@@ -7,9 +7,13 @@ export default defineConfig({
   build: {
     rollupOptions: {
       output: {
-        manualChunks: {
-          vendor: ['react', 'react-dom'],
-          socket: ['socket.io-client']
+        manualChunks(id) {
+          if (id.includes('node_modules/react') || id.includes('node_modules/react-dom')) {
+            return 'vendor';
+          }
+          if (id.includes('node_modules/socket.io-client') || id.includes('node_modules/socket.io-parser')) {
+            return 'socket';
+          }
         }
       }
     }
