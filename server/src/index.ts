@@ -4,6 +4,7 @@ import { createServer } from 'http';
 import { Server } from 'socket.io';
 import cors from 'cors';
 import helmet from 'helmet';
+import compression from 'compression';
 import { z } from 'zod';
 import path from 'path';
 import { fileURLToPath } from 'url';
@@ -12,6 +13,9 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const app = express();
+
+app.use(compression()); // Gzip compress text, JS, CSS, JSON
+
 app.use(helmet({
   contentSecurityPolicy: {
     directives: {
@@ -164,9 +168,19 @@ io.on('connection', (socket) => {
 if (process.env.NODE_ENV === 'production') {
   // Since __dirname points to server/src when running tsx, we resolve to ../../client/dist
   const clientBuildPath = path.resolve(__dirname, '../../client/dist');
-  app.use(express.static(clientBuildPath));
+  
+  // Set aggressive cache for static assets (1 year), since Vite uses hash bursting
+  app.use('/assets', express.static(path.resolve(clientBuildPath, 'assets'), {
+    maxAge: '1y',
+    immutable: true,
+  }));
+  
+  // Setup generic static serving for everything else (icon etc) with short cache
+  app.use(express.static(clientBuildPath, { maxAge: '1h' }));
 
   app.get(/.*/, (req, res) => {
+    // Avoid caching index.html so users always get the latest bundle references
+    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
     res.sendFile(path.resolve(clientBuildPath, 'index.html'));
   });
 }
