@@ -117,6 +117,7 @@ interface SyncSession {
   id: string;          
   pinHash: string;
   pinSalt: string;
+  shareTokenHash: string;
   fileHash?: string;    
   state: SyncState;
   participants: string[];
@@ -184,6 +185,12 @@ const JoinRoomSchema = z.object({
   displayName: z.string().trim().max(24).optional(),
 });
 
+const LinkJoinRoomSchema = z.object({
+  roomId: z.string().trim().min(1).max(36),
+  shareToken: z.string().trim().min(12).max(128),
+  displayName: z.string().trim().max(24).optional(),
+});
+
 const CreateRoomSchema = z.object({
   roomId: z.string().trim().min(1).max(36),
   pin: z.string().trim().regex(/^\d{6}$/),
@@ -232,13 +239,23 @@ const buildDisplayName = (requestedName: string | undefined, socketId: string) =
 const createPinHash = (pin: string, salt: string) =>
   createHash('sha256').update(`${salt}:${pin}`).digest('hex');
 
+const hashShareToken = (shareToken: string) =>
+  createHash('sha256').update(`share:${shareToken}`).digest('hex');
+
 const verifyPin = (room: SyncSession, pin: string) => {
   const expectedHash = Buffer.from(room.pinHash, 'hex');
   const providedHash = Buffer.from(createPinHash(pin, room.pinSalt), 'hex');
   return expectedHash.length === providedHash.length && timingSafeEqual(expectedHash, providedHash);
 };
 
+const verifyShareToken = (room: SyncSession, shareToken: string) => {
+  const expectedHash = Buffer.from(room.shareTokenHash, 'hex');
+  const providedHash = Buffer.from(hashShareToken(shareToken), 'hex');
+  return expectedHash.length === providedHash.length && timingSafeEqual(expectedHash, providedHash);
+};
+
 const createParticipantId = () => randomBytes(6).toString('base64url');
+const createShareToken = () => randomBytes(18).toString('base64url');
 
 const emitRoomPeople = (roomId: string, room: SyncSession) => {
   io.to(roomId).emit('participants_updated', room.memberProfiles.map((member) => member.participantId));
@@ -247,6 +264,38 @@ const emitRoomPeople = (roomId: string, room: SyncSession) => {
 
 const getRoomMember = (room: SyncSession, socketId: string) =>
   room.memberProfiles.find((member) => member.socketId === socketId);
+
+const attachSocketToRoom = (
+  room: SyncSession,
+  socketId: string,
+  displayName: string | undefined,
+) => {
+  const resolvedDisplayName = buildDisplayName(displayName, socketId);
+  if (room.participants.length >= 20 && !isRoomParticipant(room, socketId)) {
+    return { success: false as const, error: 'Room is full' };
+  }
+
+  if (!isRoomParticipant(room, socketId)) {
+    room.participants.push(socketId);
+  }
+
+  const existingMember = getRoomMember(room, socketId);
+  if (existingMember) {
+    existingMember.displayName = resolvedDisplayName;
+  } else {
+    room.memberProfiles.push({
+      participantId: createParticipantId(),
+      socketId,
+      displayName: resolvedDisplayName,
+    });
+  }
+
+  return {
+    success: true as const,
+    room,
+    currentMember: getRoomMember(room, socketId),
+  };
+};
 
 export const resetRuntimeState = () => {
   rooms.clear();
@@ -259,6 +308,7 @@ export const createRoomForSocket = (
 ): RoomOperationResult<{
   roomId: string;
   pin: string;
+  shareToken: string;
   state: SyncState;
   participants: string[];
   memberProfiles: Array<{ participantId: string; displayName: string }>;
@@ -275,12 +325,14 @@ export const createRoomForSocket = (
   }
 
   const pin = normalizePin(parsedPayload.data.pin);
+  const shareToken = createShareToken();
   const pinSalt = randomBytes(16).toString('hex');
   const participantId = createParticipantId();
   const room: SyncSession = {
     id: roomId,
     pinHash: createPinHash(pin, pinSalt),
     pinSalt,
+    shareTokenHash: hashShareToken(shareToken),
     state: {
       position: 0,
       playing: false,
@@ -300,6 +352,7 @@ export const createRoomForSocket = (
     success: true,
     roomId,
     pin,
+    shareToken,
     state: room.state,
     participants: [participantId],
     memberProfiles: buildParticipantProfiles(room),
@@ -312,6 +365,7 @@ export const joinRoomForSocket = (
   payload: { roomId: string; pin: string; displayName?: string },
 ): RoomOperationResult<{
   roomId: string;
+  shareToken: string;
   state: SyncState;
   participants: string[];
   memberProfiles: Array<{ participantId: string; displayName: string }>;
@@ -330,35 +384,64 @@ export const joinRoomForSocket = (
     return { success: false, error: 'Room not found or PIN is incorrect' };
   }
 
-  const resolvedDisplayName = buildDisplayName(displayName, socketId);
-  if (room.participants.length >= 20 && !isRoomParticipant(room, socketId)) {
-    return { success: false, error: 'Room is full' };
+  const attachResult = attachSocketToRoom(room, socketId, displayName);
+  if (!attachResult.success) {
+    return { success: false, error: attachResult.error };
   }
 
-  if (!isRoomParticipant(room, socketId)) {
-    room.participants.push(socketId);
-  }
-
-  const existingMember = getRoomMember(room, socketId);
-  if (existingMember) {
-    existingMember.displayName = resolvedDisplayName;
-  } else {
-    room.memberProfiles.push({
-      participantId: createParticipantId(),
-      socketId,
-      displayName: resolvedDisplayName,
-    });
-  }
-
-  const currentMember = getRoomMember(room, socketId);
+  const shareToken = createShareToken();
+  room.shareTokenHash = hashShareToken(shareToken);
 
   return {
     success: true,
     roomId,
+    shareToken,
     state: room.state,
     participants: room.memberProfiles.map((member) => member.participantId),
     memberProfiles: buildParticipantProfiles(room),
-    ...(currentMember ? { selfParticipantId: currentMember.participantId } : {}),
+    ...(attachResult.currentMember ? { selfParticipantId: attachResult.currentMember.participantId } : {}),
+  };
+};
+
+export const joinRoomByLinkForSocket = (
+  socketId: string,
+  payload: { roomId: string; shareToken: string; displayName?: string },
+): RoomOperationResult<{
+  roomId: string;
+  shareToken: string;
+  state: SyncState;
+  participants: string[];
+  memberProfiles: Array<{ participantId: string; displayName: string }>;
+  selfParticipantId?: string;
+}> => {
+  const parsedPayload = LinkJoinRoomSchema.safeParse(payload);
+  if (!parsedPayload.success) {
+    return { success: false, error: 'Invalid room link' };
+  }
+
+  const roomId = normalizeRoomId(parsedPayload.data.roomId);
+  const shareToken = parsedPayload.data.shareToken.trim();
+  const room = rooms.get(roomId);
+  if (!room) {
+    return { success: false, error: 'Room not found' };
+  }
+  if (!verifyShareToken(room, shareToken)) {
+    return { success: false, error: 'Share link is invalid or expired' };
+  }
+
+  const attachResult = attachSocketToRoom(room, socketId, parsedPayload.data.displayName);
+  if (!attachResult.success) {
+    return { success: false, error: attachResult.error };
+  }
+
+  return {
+    success: true,
+    roomId,
+    shareToken,
+    state: room.state,
+    participants: room.memberProfiles.map((member) => member.participantId),
+    memberProfiles: buildParticipantProfiles(room),
+    ...(attachResult.currentMember ? { selfParticipantId: attachResult.currentMember.participantId } : {}),
   };
 };
 
@@ -547,6 +630,40 @@ io.on('connection', (socket) => {
     }
     const currentMember = getRoomMember(room, socket.id);
     writeLog('info', 'room.joined', {
+      roomId: response.roomId,
+      socketId: socket.id,
+      participantId: currentMember?.participantId,
+      participants: room.memberProfiles.length,
+    });
+    cb(response);
+    emitRoomPeople(response.roomId, room);
+  });
+
+  socket.on('join_room_link', (payload: { roomId: string; shareToken: string; displayName?: string }, cb) => {
+    const response = joinRoomByLinkForSocket(socket.id, payload);
+    if (!response.success) {
+      writeLog('warn', 'room.link_join.denied', {
+        socketId: socket.id,
+        roomId: payload?.roomId,
+        reason: response.error,
+      });
+      return cb(response);
+    }
+
+    const room = rooms.get(response.roomId);
+    socket.join(response.roomId);
+
+    if (!room) {
+      writeLog('warn', 'room.link_join.denied', {
+        socketId: socket.id,
+        roomId: payload?.roomId,
+        reason: 'missing_room_post_join',
+      });
+      return cb({ success: false, error: 'Room not found' });
+    }
+
+    const currentMember = getRoomMember(room, socket.id);
+    writeLog('info', 'room.link_joined', {
       roomId: response.roomId,
       socketId: socket.id,
       participantId: currentMember?.participantId,

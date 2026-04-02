@@ -43,8 +43,10 @@ Rooms are now created with:
 
 - a user-chosen room code
 - a 6-digit PIN required for join and reconnect
+- a room-specific share token used in copied invite links
 
 The server stores only a salted hash of the PIN in memory for the active room lifetime.
+It also stores only a hash of the active share token in memory rather than the raw token.
 Room codes are normalized to uppercase before lookup, and PIN values are trimmed before hash verification so harmless input formatting does not cause false credential failures.
 
 ### Rate Limiting
@@ -72,15 +74,17 @@ Production static files are served with cache settings that match their role:
 
 These are not hidden footnotes. They are the current boundaries of the implementation and should be considered before exposing the service publicly.
 
-### Room Access Is Based On Knowing The Room ID And PIN
+### Room Access Is Based On Knowing The Room ID And PIN Or Having A Valid Share Link
 
-The join path is now better than room-ID-only access, but it is still lightweight room authentication rather than user authentication. Anyone who can obtain both the room code and PIN can join and interact with that room.
+The join path is now better than room-ID-only access, but it is still lightweight room authentication rather than user authentication. Anyone who can obtain both the room code and PIN, or a currently valid share link containing the room token, can join and interact with that room.
 
 This matters more now that the room also exposes:
 
 - participant display names
 - live chat traffic
 - inline image chat messages
+
+PIN-based joins rotate the active share token, which helps invalidate older copied links, but the current model still treats the link itself as a bearer credential.
 
 ### CORS Is Not Authorization
 
@@ -114,7 +118,7 @@ The client now receives opaque participant IDs instead of raw socket IDs, which 
 
 ## Recommended Next Security Steps
 
-- Upgrade room auth further with invite tokens, expiry, or signed join payloads if rooms are shared broadly.
+- Add expiry, revocation controls, or narrower scopes to share tokens if rooms are shared broadly.
 - Move rate limiting to a shared store if the service is scaled horizontally.
 - Add stricter quotas or per-room backoff for image chat if the service is exposed to untrusted users.
 - Add structured logging and alerting around rejected payloads and abuse spikes.

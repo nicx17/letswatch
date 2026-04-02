@@ -1,10 +1,13 @@
 import React, { useEffect, useEffectEvent, useRef, useState } from 'react';
+import twemoji from 'twemoji';
 import { io, Socket } from 'socket.io-client';
 import { SyncController } from './SyncController';
 import {
   AlertTriangle,
+  Check,
   ChevronLeft,
   ChevronRight,
+  Copy,
   FileText,
   ImagePlus,
   Maximize2,
@@ -12,6 +15,7 @@ import {
   Minimize2,
   SendHorizontal,
   RefreshCw,
+  SmilePlus,
   Sparkles,
   Upload,
   UserRound,
@@ -32,6 +36,7 @@ interface SyncResponse {
   participants?: string[];
   roomId?: string;
   pin?: string;
+  shareToken?: string;
   selfParticipantId?: string;
   memberProfiles?: MemberProfile[];
   message?: ChatMessage;
@@ -51,6 +56,13 @@ interface ChatMessage {
   imageDataUrl?: string;
   sentAt: number;
 }
+
+type JoinMode = 'pin' | 'link' | null;
+const TOP_CHAT_EMOJIS = [
+  '😂', '😭', '😍', '🔥', '👏', '😮', '🥹', '❤️', '🤣', '😊',
+  '👀', '😏', '😜', '😈', '💋', '👄', '👅', '💦', '🥵', '😫',
+  '😵‍💫', '🔞', '🍑', '🍆', '🍌', '👙', '💄', '💅🏼', '🎬', '🍿',
+];
 
 const V_URL = import.meta.env.VITE_SOCKET_URL;
 const SOCKET_URL = V_URL
@@ -152,6 +164,16 @@ const getInitialDisplayName = () => {
   return window.localStorage.getItem('letswatch-display-name') ?? '';
 };
 
+const getInitialSharedRoomId = () => {
+  if (typeof window === 'undefined') return '';
+  return new URLSearchParams(window.location.search).get('room')?.trim().toUpperCase() ?? '';
+};
+
+const getInitialSharedRoomToken = () => {
+  if (typeof window === 'undefined') return '';
+  return new URLSearchParams(window.location.search).get('token')?.trim() ?? '';
+};
+
 const showSubtitleTrack = (
   videoElement: HTMLVideoElement | null,
   hasSubtitle: boolean,
@@ -176,7 +198,6 @@ const showSubtitleTrack = (
 const MAX_CHAT_IMAGE_DIMENSION = 1600;
 const MAX_CHAT_IMAGE_FILE_SIZE = 4 * 1024 * 1024;
 const MAX_CHAT_IMAGE_DATA_URL_LENGTH = 1_700_000;
-
 const readFileAsDataUrl = (file: File) =>
   new Promise<string>((resolve, reject) => {
     const reader = new FileReader();
@@ -262,13 +283,30 @@ const prepareChatImageDataUrl = async (file: File) => {
   return compressedDataUrl;
 };
 
+const EmojiText = ({ text }: { text: string }) => {
+  const textRef = useRef<HTMLSpanElement>(null);
+
+  useEffect(() => {
+    if (!textRef.current) return;
+    textRef.current.textContent = text;
+    twemoji.parse(textRef.current, {
+      folder: 'svg',
+      ext: '.svg',
+      className: 'emoji-inline',
+    });
+  }, [text]);
+
+  return <span ref={textRef} />;
+};
+
 function App() {
-  const [roomId, setRoomId] = useState('');
+  const [roomId, setRoomId] = useState(getInitialSharedRoomId);
   const [roomPin, setRoomPin] = useState('');
   const [isJoined, setIsJoined] = useState(false);
   const [isConnected, setIsConnected] = useState(false);
   const [participantsCount, setParticipantsCount] = useState(0);
   const [videoSrc, setVideoSrc] = useState<string | null>(null);
+  const [videoLabel, setVideoLabel] = useState<string | null>(null);
   const [subtitleSrc, setSubtitleSrc] = useState<string | null>(null);
   const [subtitleLabel, setSubtitleLabel] = useState<string | null>(null);
   const [drift, setDrift] = useState(0);
@@ -281,6 +319,10 @@ function App() {
   const [isChatCollapsed, setIsChatCollapsed] = useState(false);
   const [unreadMessages, setUnreadMessages] = useState(0);
   const [currentParticipantId, setCurrentParticipantId] = useState('');
+  const [joinMode, setJoinMode] = useState<JoinMode>(null);
+  const [sharedRoomId, setSharedRoomId] = useState(getInitialSharedRoomId);
+  const [shareToken, setShareToken] = useState(getInitialSharedRoomToken);
+  const [roomLinkCopied, setRoomLinkCopied] = useState(false);
   const [viewportSize, setViewportSize] = useState(() => ({
     width: typeof window === 'undefined' ? 1440 : window.innerWidth,
     height: typeof window === 'undefined' ? 900 : window.innerHeight,
@@ -290,6 +332,7 @@ function App() {
   const chatScrollRef = useRef<HTMLDivElement>(null);
   const chatImageInputRef = useRef<HTMLInputElement>(null);
   const socketRef = useRef<Socket | null>(null);
+  const copyResetTimeoutRef = useRef<number | null>(null);
   const ignoreEvents = useRef({ play: false, pause: false, seek: false });
   const objectUrlRef = useRef<string | null>(null);
   const subtitleUrlRef = useRef<string | null>(null);
@@ -317,10 +360,7 @@ function App() {
     return () => window.removeEventListener('resize', updateViewportSize);
   }, []);
 
-  const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
-
+  const applyVideoFile = (file: File) => {
     if (objectUrlRef.current) {
       URL.revokeObjectURL(objectUrlRef.current);
     }
@@ -328,6 +368,34 @@ function App() {
     const url = URL.createObjectURL(file);
     objectUrlRef.current = url;
     setVideoSrc(url);
+    setVideoLabel(file.name);
+  };
+
+  const clearVideoFile = () => {
+    if (videoRef.current) {
+      videoRef.current.pause();
+      videoRef.current.removeAttribute('src');
+      videoRef.current.load();
+    }
+
+    if (objectUrlRef.current) {
+      URL.revokeObjectURL(objectUrlRef.current);
+      objectUrlRef.current = null;
+    }
+
+    clearSubtitleTrack();
+    setVideoSrc(null);
+    setVideoLabel(null);
+    setDrift(0);
+
+  };
+
+  const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    applyVideoFile(file);
+    e.target.value = '';
   };
 
   const clearSubtitleTrack = () => {
@@ -371,6 +439,10 @@ function App() {
 
   useEffect(() => {
     return () => {
+      if (copyResetTimeoutRef.current) {
+        window.clearTimeout(copyResetTimeoutRef.current);
+      }
+
       if (objectUrlRef.current) {
         URL.revokeObjectURL(objectUrlRef.current);
       }
@@ -436,6 +508,9 @@ function App() {
     setParticipantsCount(response.participants?.length ?? 0);
     setMemberProfiles(response.memberProfiles ?? []);
     setCurrentParticipantId(response.selfParticipantId ?? '');
+    if (response.shareToken) {
+      setShareToken(response.shareToken);
+    }
 
     if (response.state) {
       applyState(response.state);
@@ -444,10 +519,59 @@ function App() {
     return true;
   };
 
+  const updateShareUrl = (nextRoomId: string, nextShareToken: string) => {
+    if (typeof window === 'undefined') return;
+
+    const url = new URL(window.location.href);
+    url.searchParams.set('room', nextRoomId);
+    url.searchParams.set('token', nextShareToken);
+    window.history.replaceState({}, '', url.toString());
+  };
+
+  const joinRoomFromLink = useEffectEvent((targetRoomId: string) => {
+    const socket = socketRef.current;
+    if (!socket || !targetRoomId || !shareToken) return;
+
+    const normalizedRoomId = targetRoomId.trim().toUpperCase();
+    clientLog('info', 'room.link_join.requested', { roomId: normalizedRoomId });
+    socket.emit('join_room_link', { roomId: normalizedRoomId, shareToken, displayName }, (response: SyncResponse) => {
+      if (syncFromRoomResponse(response)) {
+        setChatMessages([]);
+        setRoomId((response.roomId ?? normalizedRoomId).toUpperCase());
+        setRoomPin('');
+        setJoinMode('link');
+        setIsJoined(true);
+        setSharedRoomId((response.roomId ?? normalizedRoomId).toUpperCase());
+        if (response.shareToken) {
+          updateShareUrl((response.roomId ?? normalizedRoomId).toUpperCase(), response.shareToken);
+        }
+        clientLog('info', 'room.link_join.succeeded', {
+          roomId: response.roomId ?? normalizedRoomId,
+          selfParticipantId: response.selfParticipantId,
+        });
+        return;
+      }
+
+      setSharedRoomId('');
+      setShareToken('');
+      clientLog('warn', 'room.link_join.failed', { roomId: normalizedRoomId, error: response.error });
+      alert(response.error || 'Failed to join shared room');
+    });
+  });
+
   const handleReconnect = useEffectEvent(() => {
     const socket = socketRef.current;
-    if (!socket || !roomId || !roomPin || !isJoined) return;
+    if (!socket || !roomId || !isJoined) return;
 
+    if (joinMode === 'link') {
+      if (!shareToken) return;
+      socket.emit('join_room_link', { roomId, shareToken, displayName }, (response: SyncResponse) => {
+        syncFromRoomResponse(response);
+      });
+      return;
+    }
+
+    if (!roomPin) return;
     socket.emit('join_room', { roomId, pin: roomPin, displayName }, (response: SyncResponse) => {
       syncFromRoomResponse(response);
     });
@@ -513,6 +637,11 @@ function App() {
     };
   }, []);
 
+  useEffect(() => {
+    if (!isConnected || isJoined || !sharedRoomId || !shareToken) return;
+    joinRoomFromLink(sharedRoomId);
+  }, [isConnected, isJoined, shareToken, sharedRoomId]);
+
   const handleCreateRoom = () => {
     const socket = socketRef.current;
     const normalizedRoomId = roomId.trim().toUpperCase();
@@ -527,7 +656,12 @@ function App() {
         setChatMessages([]);
         setRoomId((response.roomId ?? normalizedRoomId).toUpperCase());
         setRoomPin(response.pin ?? normalizedPin);
+        setJoinMode('pin');
+        setSharedRoomId((response.roomId ?? normalizedRoomId).toUpperCase());
         setIsJoined(true);
+        if (response.shareToken) {
+          updateShareUrl((response.roomId ?? normalizedRoomId).toUpperCase(), response.shareToken);
+        }
         clientLog('info', 'room.create.succeeded', {
           roomId: response.roomId ?? normalizedRoomId,
           selfParticipantId: response.selfParticipantId,
@@ -552,7 +686,12 @@ function App() {
       if (syncFromRoomResponse(response)) {
         setChatMessages([]);
         setRoomId((response.roomId ?? normalizedRoomId).toUpperCase());
+        setJoinMode('pin');
+        setSharedRoomId((response.roomId ?? normalizedRoomId).toUpperCase());
         setIsJoined(true);
+        if (response.shareToken) {
+          updateShareUrl((response.roomId ?? normalizedRoomId).toUpperCase(), response.shareToken);
+        }
         clientLog('info', 'room.join.succeeded', {
           roomId: response.roomId ?? normalizedRoomId,
           selfParticipantId: response.selfParticipantId,
@@ -664,6 +803,36 @@ function App() {
       setChatDraft('');
       clientLog('info', 'chat.text_sent', { roomId, length: trimmedDraft.length });
     });
+  };
+
+  const handleEmojiSelect = (emoji: string) => {
+    setChatDraft((current) => `${current}${emoji}`);
+  };
+
+  const handleCopyRoomLink = async () => {
+    if (typeof window === 'undefined' || !roomId || !shareToken) return;
+
+    const shareUrl = new URL(window.location.href);
+    shareUrl.searchParams.set('room', roomId);
+    shareUrl.searchParams.set('token', shareToken);
+
+    try {
+      await window.navigator.clipboard.writeText(shareUrl.toString());
+      setRoomLinkCopied(true);
+      if (copyResetTimeoutRef.current) {
+        window.clearTimeout(copyResetTimeoutRef.current);
+      }
+      copyResetTimeoutRef.current = window.setTimeout(() => {
+        setRoomLinkCopied(false);
+      }, 2200);
+      clientLog('info', 'room.link_copied', { roomId });
+    } catch (error) {
+      clientLog('warn', 'room.link_copy_failed', {
+        roomId,
+        message: error instanceof Error ? error.message : String(error),
+      });
+      alert('Unable to copy the room link');
+    }
   };
 
   const handleChatImageChange = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -953,6 +1122,21 @@ function App() {
 
                     <div className="player-toolbar mt-4 rounded-[26px] bg-[var(--panel-strong)] px-4 py-4 sm:px-5">
                       <div className="flex flex-wrap items-center gap-3">
+                        <label className="secondary-button cursor-pointer">
+                          <Upload size={18} />
+                          <span>Change Video</span>
+                          <input
+                            type="file"
+                            accept="video/mp4,video/webm,video/x-matroska"
+                            onChange={handleFileChange}
+                            className="hidden"
+                          />
+                        </label>
+
+                        <button type="button" onClick={clearVideoFile} className="secondary-button">
+                          <span>Remove Video</span>
+                        </button>
+
                         <button type="button" onClick={handleManualSync} className="secondary-button">
                           <RefreshCw size={18} />
                           <span>Force Sync</span>
@@ -1045,7 +1229,7 @@ function App() {
                                         className="chat-image"
                                       />
                                     ) : (
-                                      <p>{message.text}</p>
+                                      <p><EmojiText text={message.text ?? ''} /></p>
                                     )}
                                   </div>
                                 </article>
@@ -1060,6 +1244,20 @@ function App() {
                         </div>
 
                         <div className="chat-compose">
+                          <div className="emoji-strip" aria-label="Quick emoji reactions">
+                            {TOP_CHAT_EMOJIS.map((emoji) => (
+                              <button
+                                key={emoji}
+                                type="button"
+                                className="emoji-chip"
+                                onClick={() => handleEmojiSelect(emoji)}
+                                aria-label={`Add ${emoji}`}
+                              >
+                                <EmojiText text={emoji} />
+                              </button>
+                            ))}
+                          </div>
+
                           <textarea
                             value={chatDraft}
                             onChange={(e) => setChatDraft(e.target.value)}
@@ -1074,11 +1272,21 @@ function App() {
                             <div className="chat-compose-actions">
                               <button
                                 type="button"
+                                onClick={() => handleEmojiSelect(TOP_CHAT_EMOJIS[0])}
+                                className="chat-icon-button"
+                                aria-label="Add emoji"
+                                title="Add emoji"
+                              >
+                                <SmilePlus size={16} />
+                              </button>
+                              <button
+                                type="button"
                                 onClick={() => chatImageInputRef.current?.click()}
-                                className="secondary-button"
+                                className="chat-icon-button"
+                                aria-label="Send image"
+                                title="Send image"
                               >
                                 <ImagePlus size={16} />
-                                <span>Image</span>
                               </button>
                               <input
                                 ref={chatImageInputRef}
@@ -1139,6 +1347,15 @@ function App() {
                         <div className="mt-2 rounded-[20px] border border-[var(--border-color)] bg-[var(--panel-quiet)] px-4 py-4 text-center font-mono text-lg font-semibold tracking-[0.08em] text-[var(--text-main)]">
                           {roomId}
                         </div>
+                        <div className="mt-3 flex flex-wrap items-center gap-3">
+                          <button type="button" onClick={handleCopyRoomLink} className="secondary-button">
+                            {roomLinkCopied ? <Check size={16} /> : <Copy size={16} />}
+                            <span>{roomLinkCopied ? 'Copied Link' : 'Copy Room Link'}</span>
+                          </button>
+                          <span className="text-xs text-[var(--text-muted)]">
+                            Anyone opening the link joins this room right away.
+                          </span>
+                        </div>
                       </div>
 
                       <div>
@@ -1147,6 +1364,32 @@ function App() {
                         </label>
                         <div className="mt-2 rounded-[20px] border border-[var(--border-color)] bg-[var(--panel-quiet)] px-4 py-4 text-center font-mono text-lg font-semibold tracking-[0.12em] text-[var(--text-main)]">
                           {roomPin}
+                        </div>
+                      </div>
+
+                      <div>
+                        <label className="block text-[11px] font-semibold uppercase tracking-[0.24em] text-[var(--text-muted)]">
+                          Current video
+                        </label>
+                        <div className="mt-2 rounded-[20px] border border-[var(--border-color)] bg-[var(--panel-quiet)] px-4 py-4 text-center text-sm font-medium text-[var(--text-main)]">
+                          {videoLabel ?? 'No local file loaded'}
+                        </div>
+                        <div className="mt-3 flex flex-wrap gap-3">
+                          <label className="secondary-button cursor-pointer">
+                            <Upload size={16} />
+                            <span>{videoLabel ? 'Switch Video' : 'Add Video'}</span>
+                            <input
+                              type="file"
+                              accept="video/mp4,video/webm,video/x-matroska"
+                              onChange={handleFileChange}
+                              className="hidden"
+                            />
+                          </label>
+                          {videoSrc ? (
+                            <button type="button" onClick={clearVideoFile} className="secondary-button">
+                              Remove
+                            </button>
+                          ) : null}
                         </div>
                       </div>
 

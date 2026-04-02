@@ -3,6 +3,7 @@ import {
   applySyncStateForSocket,
   createRoomForSocket,
   isRateLimited,
+  joinRoomByLinkForSocket,
   joinRoomForSocket,
   resetRuntimeState,
   rooms,
@@ -26,6 +27,7 @@ describe('Server Room Logic', () => {
 
     expect(result.roomId).toBe('MOVIENGT');
     expect(result.pin).toBe('123456');
+    expect(result.shareToken).toBeTypeOf('string');
     expect(result.selfParticipantId).toBeTypeOf('string');
     expect(result.participants).toContain(result.selfParticipantId);
     expect(rooms.get(result.roomId)?.participants).toContain('socket-1');
@@ -57,6 +59,32 @@ describe('Server Room Logic', () => {
     expect(allowed.success).toBe(true);
     if (!allowed.success) return;
     expect(allowed.memberProfiles).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ displayName: 'Host' }),
+        expect.objectContaining({ displayName: 'Guest' }),
+      ]),
+    );
+  });
+
+  it('allows room entry from a share link without requiring the pin', () => {
+    const created = createRoomForSocket('socket-1', {
+      roomId: 'LINKROOM',
+      pin: '654321',
+      displayName: 'Host',
+    });
+    expect(created.success).toBe(true);
+    if (!created.success) return;
+
+    const joined = joinRoomByLinkForSocket('socket-2', {
+      roomId: 'linkroom',
+      shareToken: created.shareToken,
+      displayName: 'Guest',
+    });
+    expect(joined.success).toBe(true);
+    if (!joined.success) return;
+
+    expect(joined.roomId).toBe('LINKROOM');
+    expect(joined.memberProfiles).toEqual(
       expect.arrayContaining([
         expect.objectContaining({ displayName: 'Host' }),
         expect.objectContaining({ displayName: 'Guest' }),

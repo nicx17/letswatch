@@ -86,9 +86,12 @@ After deployment, verify:
 - the browser can connect to Socket.IO
 - a new room can be created with a chosen room code and 6-digit PIN
 - a second device can only join with the correct room code and PIN
+- the `Copy Room Link` action produces a URL containing both a room code and a token
+- opening that shared link joins the room without re-entering the PIN
+- joining again with the PIN rotates the share token so older links stop working
 - mixed-case room codes and pasted PIN values still resolve cleanly because the app normalizes them before validation
 - shared playback updates still work across both devices
-- live chat works for text and a small image message
+- live chat works for text, quick emoji reactions, and a small image message
 - the `client/dist` assets are being served
 - `index.html` is returning fresh cache headers after a deploy
 - rooms disappear after the last participant leaves and do not recover old chat history on rejoin

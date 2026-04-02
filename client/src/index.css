@@ -137,7 +137,7 @@ html[data-theme="forest"] {
 }
 
 @theme {
-    --font-sans: "Avenir Next", "Trebuchet MS", "Segoe UI", sans-serif;
+    --font-sans: "Avenir Next", "Trebuchet MS", "Segoe UI", "Apple Color Emoji", "Segoe UI Emoji", "Noto Color Emoji", "Segoe UI Symbol", sans-serif;
     --font-serif: "Iowan Old Style", "Palatino Linotype", "Book Antiqua", Georgia, serif;
     --color-bg-primary: var(--bg-primary);
     --color-bg-secondary: var(--bg-secondary);
@@ -848,10 +848,19 @@ body::after {
     line-height: 1.55;
     white-space: pre-wrap;
     word-break: break-word;
+    font-family: var(--font-sans);
 }
 
 .chat-message-bubble p {
     margin: 0;
+}
+
+.emoji-inline {
+    width: 1.2em;
+    height: 1.2em;
+    margin: 0 0.06em;
+    vertical-align: -0.18em;
+    display: inline-block;
 }
 
 .chat-message-own .chat-message-bubble {
@@ -889,6 +898,37 @@ body::after {
     padding: 0.9rem;
 }
 
+.emoji-strip {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.45rem;
+    margin-bottom: 0.85rem;
+    padding-bottom: 0.85rem;
+    border-bottom: 1px solid var(--border-color);
+}
+
+.emoji-chip {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 2.4rem;
+    height: 2.4rem;
+    padding: 0 0.55rem;
+    border: 1px solid var(--border-color);
+    border-radius: 999px;
+    background: var(--panel-quiet);
+    transition:
+        transform 160ms ease,
+        border-color 160ms ease,
+        background-color 160ms ease;
+}
+
+.emoji-chip:hover {
+    transform: translateY(-1px);
+    border-color: var(--border-hover);
+    background: rgba(255, 255, 255, 0.08);
+}
+
 .chat-input {
     width: 100%;
     resize: none;
@@ -919,6 +959,28 @@ body::after {
     display: inline-flex;
     align-items: center;
     gap: 0.75rem;
+}
+
+.chat-icon-button {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 2.8rem;
+    height: 2.8rem;
+    border-radius: 0.95rem;
+    border: 1px solid var(--border-color);
+    background: var(--panel-quiet);
+    color: var(--text-main);
+    transition:
+        transform 160ms ease,
+        border-color 160ms ease,
+        background-color 160ms ease;
+}
+
+.chat-icon-button:hover {
+    transform: translateY(-1px);
+    border-color: var(--border-hover);
+    background: rgba(255, 255, 255, 0.08);
 }
 
 .chat-compose-hint {

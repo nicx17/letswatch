@@ -6,7 +6,7 @@ Lets Watch is a local-first watch-party app for self-hosted environments. Each v
 
 - Syncs play, pause, and seek events across a room with shared participant control.
 - Lets viewers create rooms with their own room code and 6-digit join PIN.
-- Offers room chat with viewer-selected names, emoji-friendly text, and lightweight image sharing.
+- Offers room chat with viewer-selected names, quick emoji reactions, emoji-rendered text, and lightweight image sharing.
 - Serves the React frontend and the Socket.IO backend from one Node process in production.
 - Keeps media local to each participant instead of uploading it to the server.
 - Broadcasts chat messages live without storing chat history on the server.
@@ -99,6 +99,8 @@ What these commands do:
 - Chat images are resized in the browser before they are sent over Socket.IO.
 - Joining an existing room requires both the chosen room code and its 6-digit PIN.
 - Room codes are normalized to uppercase and PIN inputs are reduced to six digits during create and join.
+- Rooms also expose a copyable share link with a room-specific token so invite links can join directly without re-entering the PIN.
+- PIN-based joins rotate the current share token, so older copied links stop working after a fresh PIN join.
 - Room state is in-memory only. When the last participant disconnects, room membership and playback state are dropped.
 
 See [`DEPLOYMENT.md`](DEPLOYMENT.md) for a full deployment walkthrough.
