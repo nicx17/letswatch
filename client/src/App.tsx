@@ -3,7 +3,6 @@ import { io, Socket } from 'socket.io-client';
 import { SyncController } from './SyncController';
 import {
   AlertTriangle,
-  Crown,
   RefreshCw,
   Sparkles,
   Upload,
@@ -19,7 +18,6 @@ interface SyncState {
 
 interface SyncResponse {
   success?: boolean;
-  isLeader?: boolean;
   error?: string;
   state?: SyncState;
   participants?: string[];
@@ -83,7 +81,6 @@ function App() {
   const [roomId, setRoomId] = useState('');
   const [isJoined, setIsJoined] = useState(false);
   const [isConnected, setIsConnected] = useState(false);
-  const [isLeader, setIsLeader] = useState(false);
   const [participantsCount, setParticipantsCount] = useState(0);
   const [videoSrc, setVideoSrc] = useState<string | null>(null);
   const [drift, setDrift] = useState(0);
@@ -151,9 +148,7 @@ function App() {
   };
 
   const syncFromRoomResponse = (response: SyncResponse) => {
-    if (!response.success || response.isLeader === undefined) return false;
-
-    setIsLeader(response.isLeader);
+    if (!response.success) return false;
     setParticipantsCount(response.participants?.length ?? 0);
 
     if (response.state) {
@@ -176,10 +171,6 @@ function App() {
     applyState(state);
   });
 
-  const handleLeaderChanged = useEffectEvent((newLeaderId: string) => {
-    setIsLeader(socketRef.current?.id === newLeaderId);
-  });
-
   const handleParticipantsUpdated = useEffectEvent((participantList: string[]) => {
     setParticipantsCount(participantList.length);
   });
@@ -200,14 +191,12 @@ function App() {
     socket.on('connect', onConnect);
     socket.on('disconnect', onDisconnect);
     socket.on('state_updated', handleStateUpdated);
-    socket.on('leader_changed', handleLeaderChanged);
     socket.on('participants_updated', handleParticipantsUpdated);
 
     return () => {
       socket.off('connect', onConnect);
       socket.off('disconnect', onDisconnect);
       socket.off('state_updated', handleStateUpdated);
-      socket.off('leader_changed', handleLeaderChanged);
       socket.off('participants_updated', handleParticipantsUpdated);
       socket.disconnect();
       socketRef.current = null;
@@ -234,7 +223,7 @@ function App() {
       return;
     }
 
-    if (socket && isJoined && isLeader && videoRef.current) {
+    if (socket && isJoined && videoRef.current) {
       socket.emit('sync_state', roomId, {
         position: videoRef.current.currentTime,
         playing: true,
@@ -249,7 +238,7 @@ function App() {
       return;
     }
 
-    if (socket && isJoined && isLeader && videoRef.current) {
+    if (socket && isJoined && videoRef.current) {
       socket.emit('sync_state', roomId, {
         position: videoRef.current.currentTime,
         playing: false,
@@ -264,7 +253,7 @@ function App() {
       return;
     }
 
-    if (socket && isJoined && isLeader && videoRef.current) {
+    if (socket && isJoined && videoRef.current) {
       socket.emit('sync_state', roomId, {
         position: videoRef.current.currentTime,
         playing: !videoRef.current.paused,
@@ -306,7 +295,7 @@ function App() {
       <div className="ambient-orb ambient-orb-two" aria-hidden="true" />
       <div className="ambient-grid" aria-hidden="true" />
 
-      <header className="mx-auto mb-8 w-full max-w-[1400px] px-6 pt-8 sm:px-8 lg:px-10">
+      <header className="mx-auto mb-10 w-full max-w-[1480px] px-6 pt-8 sm:px-8 lg:px-12">
         <div className="chrome-panel flex flex-col gap-6 rounded-[32px] px-6 py-6 sm:px-8 lg:flex-row lg:items-center lg:justify-between">
           <div className="flex items-start gap-4">
             <div className="brand-mark">
@@ -346,53 +335,54 @@ function App() {
         </div>
       </header>
 
-      <main className="mx-auto flex w-full max-w-[1400px] flex-1 flex-col px-6 pb-12 sm:px-8 lg:px-10">
+      <main className="mx-auto flex w-full max-w-[1480px] flex-1 flex-col px-6 pb-10 sm:px-8 lg:px-12">
         {!isJoined ? (
-          <section className="grid flex-1 items-start gap-6 lg:grid-cols-[1.1fr_0.9fr]">
-            <div className="chrome-panel panel-feature rounded-[32px] p-8 sm:p-10">
-              <div className="space-y-5">
+          <section className="grid flex-1 content-start gap-8 lg:grid-cols-[1.15fr_0.85fr] xl:gap-10">
+            <div className="chrome-panel panel-feature rounded-[32px] p-8 sm:p-10 lg:p-12">
+              <div className="space-y-6">
                 <div className="eyebrow">
                   <Sparkles size={14} />
-                  <span>Sleeker shared sessions</span>
+                  <span>Watch together</span>
                 </div>
-                <h2 className="text-4xl font-semibold tracking-tight text-[var(--text-main)] sm:text-5xl">
-                  Pick a theme, share a room, and keep everyone in sync.
+                <h2 className="section-title max-w-4xl text-[var(--text-main)]">
+                  Watch together, beautifully.
                 </h2>
-                <p className="max-w-2xl text-base leading-7 text-[var(--text-muted)] sm:text-lg">
-                  Lets Watch keeps the media on each viewer&apos;s machine while the room state flows through a lightweight
-                  Socket.IO control plane. Fast to self-host, easy to join, and much nicer to look at now.
+                <p className="max-w-3xl text-[1.05rem] leading-8 text-[var(--text-muted)] sm:text-[1.12rem]">
+                  Bring your own video, invite someone into the same room, and enjoy a setup that feels calm, polished,
+                  and easy to use from the first click.
                 </p>
               </div>
 
-              <div className="mt-8 grid gap-4 sm:grid-cols-3">
+              <div className="mt-10 grid gap-5 sm:grid-cols-3">
                 <div className="info-tile">
-                  <span className="info-tile-title">Local files</span>
-                  <span className="info-tile-copy">No uploads, no transcoding, no quality loss.</span>
+                  <span className="info-tile-title">Bring your file</span>
+                  <span className="info-tile-copy">Open the video you already have and keep the full quality.</span>
                 </div>
                 <div className="info-tile">
-                  <span className="info-tile-title">Live rooms</span>
-                  <span className="info-tile-copy">Leader-based sync for play, pause, and seek.</span>
+                  <span className="info-tile-title">Shared control</span>
+                  <span className="info-tile-copy">Anyone in the room can play, pause, and scrub the timeline.</span>
                 </div>
                 <div className="info-tile">
-                  <span className="info-tile-title">Theme-ready</span>
-                  <span className="info-tile-copy">Midnight, Ocean, Romance, Forest, and more.</span>
+                  <span className="info-tile-title">Room atmosphere</span>
+                  <span className="info-tile-copy">Switch between Midnight, Ocean, Romance, Forest, and Ivory.</span>
                 </div>
               </div>
             </div>
 
-            <div className="chrome-panel panel-form rounded-[32px] p-8 sm:p-10">
-              <div className="space-y-2">
+            <div className="chrome-panel panel-form rounded-[32px] p-8 sm:p-10 lg:p-12">
+              <div className="space-y-3">
                 <p className="eyebrow">
                   <Users size={14} />
                   <span>Join a session</span>
                 </p>
-                <h2 className="text-3xl font-semibold tracking-tight text-[var(--text-main)]">Enter your room code</h2>
-                <p className="text-sm leading-6 text-[var(--text-muted)]">
-                  Start a new room automatically or reconnect to an existing one with the same code.
+                <h2 className="section-title text-[var(--text-main)]">Enter your room code</h2>
+                <p className="text-base leading-7 text-[var(--text-muted)]">
+                  Use any room code you like. If it already exists, you&apos;ll jump back in. If not, a new room is created
+                  for you instantly.
                 </p>
               </div>
 
-              <div className="mt-8 space-y-4">
+              <div className="mt-10 space-y-5">
                 <label className="block text-xs font-semibold uppercase tracking-[0.28em] text-[var(--text-muted)]">
                   Room code
                 </label>
@@ -502,13 +492,9 @@ function App() {
                         </div>
                       </div>
 
-                      <div
-                        className={`role-banner ${
-                          isLeader ? 'role-banner-leader' : 'role-banner-viewer'
-                        }`}
-                      >
-                        {isLeader ? <Crown size={18} /> : <Users size={18} />}
-                        <span>{isLeader ? 'You are leading playback' : 'You are following the leader'}</span>
+                      <div className="role-banner role-banner-shared">
+                        <Users size={18} />
+                        <span>Everyone in this room can control playback</span>
                       </div>
                     </div>
 
@@ -534,7 +520,7 @@ function App() {
         )}
       </main>
 
-      <footer className="mx-auto mb-6 w-full max-w-[1400px] px-6 text-center text-sm text-[var(--text-muted)] sm:px-8 lg:px-10">
+      <footer className="mx-auto mt-auto w-full max-w-[1480px] px-6 pb-6 text-center text-sm text-[var(--text-muted)] sm:px-8 lg:px-12">
         <div className="chrome-panel flex flex-col items-center justify-between gap-2 rounded-[26px] px-5 py-4 sm:flex-row">
           <p className="text-xs uppercase tracking-[0.26em] text-[var(--text-soft)]">&copy; 2026 nickcardoso</p>
           <a

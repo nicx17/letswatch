@@ -87,7 +87,6 @@ interface SyncSession {
   id: string;          
   pinHash?: string;     
   fileHash?: string;    
-  leaderId: string;    
   state: {
     position: number;
     playing: boolean;
@@ -132,10 +131,8 @@ io.on('connection', (socket) => {
 
     let room = rooms.get(roomId);
     if (!room) {
-      // The first participant becomes the room leader and seeds the shared state.
       room = {
         id: roomId,
-        leaderId: socket.id,
         state: {
           position: 0,
           playing: false,
@@ -159,7 +156,6 @@ io.on('connection', (socket) => {
 
     cb({ 
       success: true, 
-      isLeader: room.leaderId === socket.id,
       state: room.state,
       participants: room.participants,
     });
@@ -173,7 +169,6 @@ io.on('connection', (socket) => {
     const room = rooms.get(roomId);
     if (!room) return;
     if (!isRoomParticipant(room, socket.id)) return;
-    if (room.leaderId !== socket.id) return;
 
     // Drop malformed payloads before they can update shared room state.
     const result = SeekSchema.safeParse(update);
@@ -200,10 +195,6 @@ io.on('connection', (socket) => {
       room.participants = room.participants.filter(id => id !== socket.id);
       if (room.participants.length === 0) {
         rooms.delete(roomId);
-      } else if (room.leaderId === socket.id) {
-        // Transfer control to the next connected participant when the leader leaves.
-        room.leaderId = room.participants[0] || "";
-        io.to(roomId).emit('leader_changed', room.leaderId);
       }
       io.to(roomId).emit('participants_updated', room.participants);
     });

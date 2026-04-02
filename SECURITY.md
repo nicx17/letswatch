@@ -26,9 +26,9 @@ The server also enables `compression` for text-based responses.
 
 Incoming `sync_state` payloads are validated with Zod before room state is updated. This prevents malformed payloads from being written into the shared in-memory state map.
 
-### Room Membership And Leader Enforcement
+### Room Membership Enforcement
 
-Room-scoped events now require the socket to be part of the room. Playback updates are additionally restricted to the current room leader, which keeps viewer clients from overwriting shared state.
+Room-scoped events require the socket to be part of the room before the backend will return or update shared playback state.
 
 ### Rate Limiting
 
@@ -36,7 +36,7 @@ The backend keeps a lightweight per-socket rate-limit window for room events. It
 
 ### Room Cleanup
 
-Room membership is cleaned up on disconnect. Empty rooms are deleted, and leadership is reassigned to the next participant when the current leader leaves.
+Room membership is cleaned up on disconnect, and empty rooms are deleted automatically.
 
 ### Static Asset Caching
 

@@ -43,12 +43,12 @@ describe('Server Socket Logic Tests', () => {
     rooms.clear();
   });
 
-  it('should create a room and assign leader', async () => {
+  it('should create a room and include the creator as a participant', async () => {
     await new Promise<void>((resolve) => {
       clientSocket1.emit('join_room', 'test_room_1', (res: any) => {
         expect(res.success).toBe(true);
-        expect(res.isLeader).toBe(true);
-        expect(rooms.get('test_room_1')?.leaderId).toBe(clientSocket1.id);
+        expect(res.participants).toContain(clientSocket1.id);
+        expect(rooms.get('test_room_1')?.participants).toContain(clientSocket1.id);
         resolve();
       });
     });
@@ -73,15 +73,15 @@ describe('Server Socket Logic Tests', () => {
     });
   });
 
-  it('should prevent non-leaders from sending sync_state', async () => {
+  it('should allow any participant in the room to send sync_state', async () => {
     await new Promise<void>((resolve) => {
       clientSocket1.emit('join_room', 'test_room_x', () => {
         clientSocket2.emit('join_room', 'test_room_x', () => {
           clientSocket2.emit('sync_state', 'test_room_x', { position: 999, playing: true });
           
           setTimeout(() => {
-            expect(rooms.get('test_room_x')?.state.position).toBe(0);
-            expect(rooms.get('test_room_x')?.state.playing).toBe(false);
+            expect(rooms.get('test_room_x')?.state.position).toBe(999);
+            expect(rooms.get('test_room_x')?.state.playing).toBe(true);
             resolve();
           }, 50);
         });

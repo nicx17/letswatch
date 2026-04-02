@@ -4,7 +4,7 @@ Lets Watch is a local-first watch-party app for self-hosted environments. Each v
 
 ## What It Does
 
-- Syncs play, pause, and seek events across a room.
+- Syncs play, pause, and seek events across a room with shared participant control.
 - Serves the React frontend and the Socket.IO backend from one Node process in production.
 - Keeps media local to each participant instead of uploading it to the server.
 - Includes basic hardening such as Helmet, payload validation with Zod, and lightweight rate limiting.
