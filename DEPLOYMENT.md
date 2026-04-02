@@ -84,9 +84,14 @@ After deployment, verify:
 
 - the frontend loads successfully from the public origin
 - the browser can connect to Socket.IO
-- a room can be created and joined from two devices
+- a new room can be created with a chosen room code and 6-digit PIN
+- a second device can only join with the correct room code and PIN
+- mixed-case room codes and pasted PIN values still resolve cleanly because the app normalizes them before validation
+- shared playback updates still work across both devices
+- live chat works for text and a small image message
 - the `client/dist` assets are being served
 - `index.html` is returning fresh cache headers after a deploy
+- rooms disappear after the last participant leaves and do not recover old chat history on rejoin
 
 ## CI And Release Hygiene
 

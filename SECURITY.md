@@ -5,7 +5,8 @@
 Lets Watch is designed around a local-first media model:
 
 - Video files stay on each participant's machine.
-- The server only stores room metadata and playback state in memory.
+- The server only stores room metadata and playback state in memory while a room is active.
+- Chat is broadcast live and is not persisted in memory after delivery.
 - No database, file upload pipeline, or persistent media storage is part of the current architecture.
 
 That keeps the data surface small, but it does not eliminate the need for runtime hardening on the sync layer.
@@ -26,9 +27,25 @@ The server also enables `compression` for text-based responses.
 
 Incoming `sync_state` payloads are validated with Zod before room state is updated. This prevents malformed payloads from being written into the shared in-memory state map.
 
+Chat payloads are also validated:
+
+- text messages must be non-empty and stay within the server-side length cap
+- image messages must be `data:image/...;base64,...` payloads and stay under the configured payload limit
+- display names are length-bounded before they are accepted
+
 ### Room Membership Enforcement
 
 Room-scoped events require the socket to be part of the room before the backend will return or update shared playback state.
+
+### Room Credentials
+
+Rooms are now created with:
+
+- a user-chosen room code
+- a 6-digit PIN required for join and reconnect
+
+The server stores only a salted hash of the PIN in memory for the active room lifetime.
+Room codes are normalized to uppercase before lookup, and PIN values are trimmed before hash verification so harmless input formatting does not cause false credential failures.
 
 ### Rate Limiting
 
@@ -37,6 +54,12 @@ The backend keeps a lightweight per-socket rate-limit window for room events. It
 ### Room Cleanup
 
 Room membership is cleaned up on disconnect, and empty rooms are deleted automatically.
+
+Because rooms are deleted when the final participant leaves:
+
+- room playback state is forgotten
+- viewer display names are forgotten
+- there is no chat history to recover
 
 ### Static Asset Caching
 
@@ -49,9 +72,15 @@ Production static files are served with cache settings that match their role:
 
 These are not hidden footnotes. They are the current boundaries of the implementation and should be considered before exposing the service publicly.
 
-### Room Access Is Based On Knowing The Room ID
+### Room Access Is Based On Knowing The Room ID And PIN
 
-There is no server-side authentication, password, or signed join token today. Anyone who can connect to the server and guess or obtain a room ID can attempt to interact with that room.
+The join path is now better than room-ID-only access, but it is still lightweight room authentication rather than user authentication. Anyone who can obtain both the room code and PIN can join and interact with that room.
+
+This matters more now that the room also exposes:
+
+- participant display names
+- live chat traffic
+- inline image chat messages
 
 ### CORS Is Not Authorization
 
@@ -61,14 +90,33 @@ The project configures CORS for Express and Socket.IO polling requests, but CORS
 
 The current limiter uses an in-memory `Map`. It resets on restart and does not coordinate across replicas.
 
+### Image Chat Still Consumes Bandwidth And Memory In Transit
+
+Image messages are not stored server-side, but they still pass through the Socket.IO server and are broadcast to every connected room participant. Large or frequent image sends can still increase memory pressure, bandwidth use, and client-side rendering cost.
+
+The current implementation reduces that risk by:
+
+- compressing and resizing images in the browser before send
+- enforcing a Socket.IO buffer limit on the server
+- validating image message size and format with Zod
+
+That is useful hardening, but it is not equivalent to a dedicated media pipeline with quotas or malware scanning.
+
 ### State Is Ephemeral
 
 All room state lives in memory. Restarting the server clears active rooms.
 
+### Participant Metadata Is Visible Inside The Room
+
+The server shares room membership updates with all room participants so the UI can show who is present. This is expected product behavior, but it also means display names are visible to everyone who joins that room.
+
+The client now receives opaque participant IDs instead of raw socket IDs, which reduces unnecessary exposure of internal connection identifiers.
+
 ## Recommended Next Security Steps
 
-- Add room authentication such as a PIN, invite token, or signed join payload.
+- Upgrade room auth further with invite tokens, expiry, or signed join payloads if rooms are shared broadly.
 - Move rate limiting to a shared store if the service is scaled horizontally.
+- Add stricter quotas or per-room backoff for image chat if the service is exposed to untrusted users.
 - Add structured logging and alerting around rejected payloads and abuse spikes.
 
 ## Repository Security Workflow

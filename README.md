@@ -5,8 +5,11 @@ Lets Watch is a local-first watch-party app for self-hosted environments. Each v
 ## What It Does
 
 - Syncs play, pause, and seek events across a room with shared participant control.
+- Lets viewers create rooms with their own room code and 6-digit join PIN.
+- Offers room chat with viewer-selected names, emoji-friendly text, and lightweight image sharing.
 - Serves the React frontend and the Socket.IO backend from one Node process in production.
 - Keeps media local to each participant instead of uploading it to the server.
+- Broadcasts chat messages live without storing chat history on the server.
 - Includes basic hardening such as Helmet, payload validation with Zod, and lightweight rate limiting.
 
 ## Repository Layout
@@ -93,6 +96,10 @@ What these commands do:
 - The backend serves `client/dist` when `NODE_ENV=production`.
 - Static assets under `/assets` are cached aggressively because Vite fingerprints them.
 - `index.html` is served with `no-store` caching so browsers always pick up the latest asset references.
+- Chat images are resized in the browser before they are sent over Socket.IO.
+- Joining an existing room requires both the chosen room code and its 6-digit PIN.
+- Room codes are normalized to uppercase and PIN inputs are reduced to six digits during create and join.
+- Room state is in-memory only. When the last participant disconnects, room membership and playback state are dropped.
 
 See [`DEPLOYMENT.md`](DEPLOYMENT.md) for a full deployment walkthrough.
 

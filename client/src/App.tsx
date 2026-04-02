@@ -3,9 +3,18 @@ import { io, Socket } from 'socket.io-client';
 import { SyncController } from './SyncController';
 import {
   AlertTriangle,
+  ChevronLeft,
+  ChevronRight,
+  FileText,
+  ImagePlus,
+  Maximize2,
+  MessageSquare,
+  Minimize2,
+  SendHorizontal,
   RefreshCw,
   Sparkles,
   Upload,
+  UserRound,
   Users,
   WifiOff,
 } from 'lucide-react';
@@ -21,6 +30,26 @@ interface SyncResponse {
   error?: string;
   state?: SyncState;
   participants?: string[];
+  roomId?: string;
+  pin?: string;
+  selfParticipantId?: string;
+  memberProfiles?: MemberProfile[];
+  message?: ChatMessage;
+}
+
+interface MemberProfile {
+  participantId: string;
+  displayName: string;
+}
+
+interface ChatMessage {
+  id: string;
+  participantId: string;
+  displayName: string;
+  type: 'text' | 'image';
+  text?: string;
+  imageDataUrl?: string;
+  sentAt: number;
 }
 
 const V_URL = import.meta.env.VITE_SOCKET_URL;
@@ -30,7 +59,48 @@ const SOCKET_URL = V_URL
     ? window.location.origin
     : `http://${window.location.hostname}:4000`;
 
+const clientLoggingEnabled =
+  import.meta.env.DEV || (typeof window !== 'undefined' && window.localStorage.getItem('letswatch-debug') === '1');
+
+const clientLog = (
+  level: 'info' | 'warn' | 'error',
+  event: string,
+  meta?: Record<string, unknown>,
+) => {
+  if (!clientLoggingEnabled && level === 'info') return;
+
+  const payload = {
+    ts: new Date().toISOString(),
+    ns: 'client',
+    level,
+    event,
+    ...(meta ? { meta } : {}),
+  };
+
+  if (level === 'error') {
+    console.error(payload);
+    return;
+  }
+
+  if (level === 'warn') {
+    console.warn(payload);
+    return;
+  }
+
+  console.info(payload);
+};
+
 const syncController = new SyncController();
+
+const convertSrtToVtt = (subtitleContent: string) => {
+  const normalized = subtitleContent.replace(/\r+/g, '');
+  const withCueTimings = normalized.replace(
+    /(\d{2}:\d{2}:\d{2}),(\d{3})/g,
+    '$1.$2',
+  );
+
+  return `WEBVTT\n\n${withCueTimings.trim()}\n`;
+};
 
 const THEME_OPTIONS = [
   {
@@ -77,24 +147,175 @@ const getInitialTheme = (): ThemeName => {
   return window.matchMedia('(prefers-color-scheme: dark)').matches ? 'midnight' : 'ivory';
 };
 
+const getInitialDisplayName = () => {
+  if (typeof window === 'undefined') return '';
+  return window.localStorage.getItem('letswatch-display-name') ?? '';
+};
+
+const showSubtitleTrack = (
+  videoElement: HTMLVideoElement | null,
+  hasSubtitle: boolean,
+  activeLabel: string | null,
+) => {
+  if (!videoElement || !hasSubtitle) return;
+
+  const subtitleTracks = Array.from(videoElement.textTracks);
+  subtitleTracks.forEach((track) => {
+    track.mode = 'disabled';
+  });
+
+  const uploadedTrack = subtitleTracks.find(
+    (track) => track.label === (activeLabel ?? 'Uploaded subtitles'),
+  );
+
+  if (uploadedTrack) {
+    uploadedTrack.mode = 'showing';
+  }
+};
+
+const MAX_CHAT_IMAGE_DIMENSION = 1600;
+const MAX_CHAT_IMAGE_FILE_SIZE = 4 * 1024 * 1024;
+const MAX_CHAT_IMAGE_DATA_URL_LENGTH = 1_700_000;
+
+const readFileAsDataUrl = (file: File) =>
+  new Promise<string>((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      if (typeof reader.result === 'string') {
+        resolve(reader.result);
+        return;
+      }
+
+      reject(new Error('Unable to read image data'));
+    };
+    reader.onerror = () => reject(reader.error ?? new Error('Unable to read image data'));
+    reader.readAsDataURL(file);
+  });
+
+const loadImageElement = (dataUrl: string) =>
+  new Promise<HTMLImageElement>((resolve, reject) => {
+    const image = new Image();
+    image.onload = () => resolve(image);
+    image.onerror = () => reject(new Error('Unable to load image'));
+    image.src = dataUrl;
+  });
+
+const canvasToDataUrl = (
+  canvas: HTMLCanvasElement,
+  mimeType: 'image/webp' | 'image/jpeg',
+  quality: number,
+) =>
+  new Promise<string>((resolve, reject) => {
+    canvas.toBlob(
+      (blob) => {
+        if (!blob) {
+          reject(new Error('Unable to compress image'));
+          return;
+        }
+
+        const reader = new FileReader();
+        reader.onload = () => {
+          if (typeof reader.result === 'string') {
+            resolve(reader.result);
+            return;
+          }
+
+          reject(new Error('Unable to encode image'));
+        };
+        reader.onerror = () => reject(reader.error ?? new Error('Unable to encode image'));
+        reader.readAsDataURL(blob);
+      },
+      mimeType,
+      quality,
+    );
+  });
+
+const prepareChatImageDataUrl = async (file: File) => {
+  const sourceDataUrl = await readFileAsDataUrl(file);
+  const image = await loadImageElement(sourceDataUrl);
+  const scale = Math.min(1, MAX_CHAT_IMAGE_DIMENSION / Math.max(image.width, image.height));
+
+  const canvas = document.createElement('canvas');
+  canvas.width = Math.max(1, Math.round(image.width * scale));
+  canvas.height = Math.max(1, Math.round(image.height * scale));
+
+  const context = canvas.getContext('2d');
+  if (!context) {
+    throw new Error('Unable to process image');
+  }
+
+  context.drawImage(image, 0, 0, canvas.width, canvas.height);
+
+  const preferredType = file.type === 'image/png' || file.type === 'image/gif' ? 'image/webp' : 'image/jpeg';
+  let quality = preferredType === 'image/webp' ? 0.82 : 0.84;
+  let compressedDataUrl = await canvasToDataUrl(canvas, preferredType, quality);
+
+  while (compressedDataUrl.length > MAX_CHAT_IMAGE_DATA_URL_LENGTH && quality > 0.45) {
+    quality -= 0.1;
+    compressedDataUrl = await canvasToDataUrl(canvas, preferredType, quality);
+  }
+
+  if (compressedDataUrl.length > MAX_CHAT_IMAGE_DATA_URL_LENGTH) {
+    throw new Error('That image is still too large after compression. Try a smaller image.');
+  }
+
+  return compressedDataUrl;
+};
+
 function App() {
   const [roomId, setRoomId] = useState('');
+  const [roomPin, setRoomPin] = useState('');
   const [isJoined, setIsJoined] = useState(false);
   const [isConnected, setIsConnected] = useState(false);
   const [participantsCount, setParticipantsCount] = useState(0);
   const [videoSrc, setVideoSrc] = useState<string | null>(null);
+  const [subtitleSrc, setSubtitleSrc] = useState<string | null>(null);
+  const [subtitleLabel, setSubtitleLabel] = useState<string | null>(null);
   const [drift, setDrift] = useState(0);
   const [theme, setTheme] = useState<ThemeName>(getInitialTheme);
+  const [isTheaterMode, setIsTheaterMode] = useState(false);
+  const [displayName, setDisplayName] = useState(getInitialDisplayName);
+  const [memberProfiles, setMemberProfiles] = useState<MemberProfile[]>([]);
+  const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
+  const [chatDraft, setChatDraft] = useState('');
+  const [isChatCollapsed, setIsChatCollapsed] = useState(false);
+  const [unreadMessages, setUnreadMessages] = useState(0);
+  const [currentParticipantId, setCurrentParticipantId] = useState('');
+  const [viewportSize, setViewportSize] = useState(() => ({
+    width: typeof window === 'undefined' ? 1440 : window.innerWidth,
+    height: typeof window === 'undefined' ? 900 : window.innerHeight,
+  }));
 
   const videoRef = useRef<HTMLVideoElement>(null);
+  const chatScrollRef = useRef<HTMLDivElement>(null);
+  const chatImageInputRef = useRef<HTMLInputElement>(null);
   const socketRef = useRef<Socket | null>(null);
   const ignoreEvents = useRef({ play: false, pause: false, seek: false });
   const objectUrlRef = useRef<string | null>(null);
+  const subtitleUrlRef = useRef<string | null>(null);
 
   useEffect(() => {
     document.documentElement.dataset.theme = theme;
     window.localStorage.setItem('letswatch-theme', theme);
   }, [theme]);
+
+  useEffect(() => {
+    window.localStorage.setItem('letswatch-display-name', displayName);
+  }, [displayName]);
+
+  useEffect(() => {
+    const updateViewportSize = () => {
+      setViewportSize({
+        width: window.innerWidth,
+        height: window.innerHeight,
+      });
+    };
+
+    updateViewportSize();
+    window.addEventListener('resize', updateViewportSize);
+
+    return () => window.removeEventListener('resize', updateViewportSize);
+  }, []);
 
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -109,13 +330,71 @@ function App() {
     setVideoSrc(url);
   };
 
+  const clearSubtitleTrack = () => {
+    if (videoRef.current) {
+      Array.from(videoRef.current.textTracks).forEach((track) => {
+        track.mode = 'disabled';
+      });
+    }
+
+    if (subtitleUrlRef.current) {
+      URL.revokeObjectURL(subtitleUrlRef.current);
+      subtitleUrlRef.current = null;
+    }
+
+    setSubtitleSrc(null);
+    setSubtitleLabel(null);
+  };
+
+  const handleSubtitleChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    clearSubtitleTrack();
+
+    const fileExtension = file.name.split('.').pop()?.toLowerCase();
+    let nextSubtitleUrl: string;
+
+    if (fileExtension === 'srt') {
+      const srtText = await file.text();
+      const vttBlob = new Blob([convertSrtToVtt(srtText)], { type: 'text/vtt' });
+      nextSubtitleUrl = URL.createObjectURL(vttBlob);
+    } else {
+      nextSubtitleUrl = URL.createObjectURL(file);
+    }
+
+    subtitleUrlRef.current = nextSubtitleUrl;
+    setSubtitleSrc(nextSubtitleUrl);
+    setSubtitleLabel(file.name);
+    e.target.value = '';
+  };
+
   useEffect(() => {
     return () => {
       if (objectUrlRef.current) {
         URL.revokeObjectURL(objectUrlRef.current);
       }
+
+      if (subtitleUrlRef.current) {
+        URL.revokeObjectURL(subtitleUrlRef.current);
+      }
     };
   }, []);
+
+  useEffect(() => {
+    if (!subtitleSrc) return;
+
+    const timeoutId = window.setTimeout(() => {
+      showSubtitleTrack(videoRef.current, true, subtitleLabel);
+    }, 0);
+
+    return () => window.clearTimeout(timeoutId);
+  }, [subtitleSrc, subtitleLabel]);
+
+  useEffect(() => {
+    if (!chatScrollRef.current) return;
+    chatScrollRef.current.scrollTop = chatScrollRef.current.scrollHeight;
+  }, [chatMessages, isChatCollapsed]);
 
   const applyState = (state: SyncState) => {
     if (!videoRef.current) return;
@@ -129,7 +408,12 @@ function App() {
 
     if (state.playing && videoRef.current.paused) {
       ignoreEvents.current.play = true;
-      videoRef.current.play().catch((error) => console.error('Playback stopped', error));
+      videoRef.current.play().catch((error) => {
+        clientLog('error', 'playback.play_failed', {
+          roomId,
+          message: error instanceof Error ? error.message : String(error),
+        });
+      });
     } else if (!state.playing && !videoRef.current.paused) {
       ignoreEvents.current.pause = true;
       videoRef.current.pause();
@@ -150,6 +434,8 @@ function App() {
   const syncFromRoomResponse = (response: SyncResponse) => {
     if (!response.success) return false;
     setParticipantsCount(response.participants?.length ?? 0);
+    setMemberProfiles(response.memberProfiles ?? []);
+    setCurrentParticipantId(response.selfParticipantId ?? '');
 
     if (response.state) {
       applyState(response.state);
@@ -160,9 +446,9 @@ function App() {
 
   const handleReconnect = useEffectEvent(() => {
     const socket = socketRef.current;
-    if (!socket || !roomId || !isJoined) return;
+    if (!socket || !roomId || !roomPin || !isJoined) return;
 
-    socket.emit('join_room', roomId, (response: SyncResponse) => {
+    socket.emit('join_room', { roomId, pin: roomPin, displayName }, (response: SyncResponse) => {
       syncFromRoomResponse(response);
     });
   });
@@ -175,42 +461,104 @@ function App() {
     setParticipantsCount(participantList.length);
   });
 
+  const handleMemberProfilesUpdated = useEffectEvent((profiles: MemberProfile[]) => {
+    setMemberProfiles(profiles);
+    setParticipantsCount(profiles.length);
+  });
+
+  const handleChatMessage = useEffectEvent((message: ChatMessage) => {
+    setChatMessages((current) => [...current, message].slice(-120));
+
+    if (isChatCollapsed && message.participantId !== currentParticipantId) {
+      setUnreadMessages((current) => current + 1);
+    }
+  });
+
+  const handleDriftCorrection = useEffectEvent((state: SyncState) => {
+    applyState(state);
+  });
+
   useEffect(() => {
     const socket = io(SOCKET_URL);
     socketRef.current = socket;
 
     const onConnect = () => {
       setIsConnected(true);
+      clientLog('info', 'socket.connected', { transport: socket.io.engine.transport.name });
       handleReconnect();
     };
 
     const onDisconnect = () => {
       setIsConnected(false);
+      setCurrentParticipantId('');
+      clientLog('warn', 'socket.disconnected');
     };
 
     socket.on('connect', onConnect);
     socket.on('disconnect', onDisconnect);
     socket.on('state_updated', handleStateUpdated);
     socket.on('participants_updated', handleParticipantsUpdated);
+    socket.on('member_profiles_updated', handleMemberProfilesUpdated);
+    socket.on('chat_message', handleChatMessage);
 
     return () => {
       socket.off('connect', onConnect);
       socket.off('disconnect', onDisconnect);
       socket.off('state_updated', handleStateUpdated);
       socket.off('participants_updated', handleParticipantsUpdated);
+      socket.off('member_profiles_updated', handleMemberProfilesUpdated);
+      socket.off('chat_message', handleChatMessage);
       socket.disconnect();
       socketRef.current = null;
     };
   }, []);
 
+  const handleCreateRoom = () => {
+    const socket = socketRef.current;
+    const normalizedRoomId = roomId.trim().toUpperCase();
+    const normalizedPin = roomPin.replace(/\D/g, '').slice(0, 6);
+    if (!socket || !normalizedRoomId || !normalizedPin) return;
+
+    setRoomId(normalizedRoomId);
+    setRoomPin(normalizedPin);
+    clientLog('info', 'room.create.requested', { roomId: normalizedRoomId, displayName: displayName || undefined });
+    socket.emit('create_room', { roomId: normalizedRoomId, pin: normalizedPin, displayName }, (response: SyncResponse) => {
+      if (syncFromRoomResponse(response)) {
+        setChatMessages([]);
+        setRoomId((response.roomId ?? normalizedRoomId).toUpperCase());
+        setRoomPin(response.pin ?? normalizedPin);
+        setIsJoined(true);
+        clientLog('info', 'room.create.succeeded', {
+          roomId: response.roomId ?? normalizedRoomId,
+          selfParticipantId: response.selfParticipantId,
+        });
+      } else {
+        clientLog('warn', 'room.create.failed', { error: response.error });
+        alert(response.error || 'Failed to create room');
+      }
+    });
+  };
+
   const handleJoin = () => {
     const socket = socketRef.current;
-    if (!roomId || !socket) return;
+    const normalizedRoomId = roomId.trim().toUpperCase();
+    const normalizedPin = roomPin.replace(/\D/g, '').slice(0, 6);
+    if (!normalizedRoomId || !normalizedPin || !socket) return;
 
-    socket.emit('join_room', roomId, (response: SyncResponse) => {
+    setRoomId(normalizedRoomId);
+    setRoomPin(normalizedPin);
+    clientLog('info', 'room.join.requested', { roomId: normalizedRoomId });
+    socket.emit('join_room', { roomId: normalizedRoomId, pin: normalizedPin, displayName }, (response: SyncResponse) => {
       if (syncFromRoomResponse(response)) {
+        setChatMessages([]);
+        setRoomId((response.roomId ?? normalizedRoomId).toUpperCase());
         setIsJoined(true);
+        clientLog('info', 'room.join.succeeded', {
+          roomId: response.roomId ?? normalizedRoomId,
+          selfParticipantId: response.selfParticipantId,
+        });
       } else {
+        clientLog('warn', 'room.join.failed', { roomId: normalizedRoomId, error: response.error });
         alert(response.error || 'Failed to join room');
       }
     });
@@ -275,13 +623,131 @@ function App() {
         setDrift(currentDrift);
 
         if (currentDrift > 2) {
-          applyState(response.state);
+          handleDriftCorrection(response.state);
         }
       });
     }, 3000);
 
     return () => clearInterval(interval);
   }, [isJoined, roomId]);
+
+  const handleSaveDisplayName = () => {
+    const socket = socketRef.current;
+    if (!socket || !isJoined) return;
+
+    socket.emit('set_display_name', roomId, displayName, (response: SyncResponse) => {
+      if (!response.success) {
+        clientLog('warn', 'profile.save_failed', { roomId, error: response.error });
+        alert(response.error || 'Unable to save name');
+        return;
+      }
+
+      if (response.memberProfiles) {
+        setMemberProfiles(response.memberProfiles);
+      }
+      clientLog('info', 'profile.saved', { roomId });
+    });
+  };
+
+  const handleSendChatMessage = () => {
+    const socket = socketRef.current;
+    const trimmedDraft = chatDraft.trim();
+    if (!socket || !isJoined || !trimmedDraft) return;
+
+    socket.emit('send_chat_message', roomId, { type: 'text', text: trimmedDraft }, (response: SyncResponse) => {
+      if (!response.success) {
+        clientLog('warn', 'chat.text_failed', { roomId, error: response.error });
+        alert(response.error || 'Unable to send message');
+        return;
+      }
+
+      setChatDraft('');
+      clientLog('info', 'chat.text_sent', { roomId, length: trimmedDraft.length });
+    });
+  };
+
+  const handleChatImageChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file || !isJoined || !socketRef.current) return;
+
+    if (!file.type.startsWith('image/')) {
+      clientLog('warn', 'chat.image_rejected', { reason: 'invalid_type', fileType: file.type });
+      alert('Choose a PNG, JPG, GIF, or WebP image');
+      e.target.value = '';
+      return;
+    }
+
+    if (file.size > MAX_CHAT_IMAGE_FILE_SIZE) {
+      clientLog('warn', 'chat.image_rejected', { reason: 'file_too_large', fileSize: file.size });
+      alert('Keep chat images under 4 MB before upload');
+      e.target.value = '';
+      return;
+    }
+
+    void prepareChatImageDataUrl(file)
+      .then((imageDataUrl) => {
+        clientLog('info', 'chat.image_prepared', {
+          roomId,
+          originalSize: file.size,
+          payloadSize: imageDataUrl.length,
+          mimeType: file.type,
+        });
+        socketRef.current?.emit(
+          'send_chat_message',
+          roomId,
+          { type: 'image', imageDataUrl },
+          (response: SyncResponse) => {
+            if (!response.success) {
+              clientLog('warn', 'chat.image_failed', { roomId, error: response.error });
+              alert(response.error || 'Unable to send image');
+              return;
+            }
+
+            clientLog('info', 'chat.image_sent', { roomId, payloadSize: imageDataUrl.length });
+          },
+        );
+      })
+      .catch((error: unknown) => {
+        clientLog('error', 'chat.image_prepare_failed', {
+          roomId,
+          message: error instanceof Error ? error.message : String(error),
+        });
+        alert(error instanceof Error ? error.message : 'Unable to send image');
+      });
+
+    e.target.value = '';
+  };
+
+  const handleChatKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault();
+      handleSendChatMessage();
+    }
+  };
+
+  const handleChatToggle = () => {
+    setIsChatCollapsed((current) => {
+      const nextValue = !current;
+      if (!nextValue) {
+        setUnreadMessages(0);
+      }
+      return nextValue;
+    });
+  };
+
+  const handleTheaterToggle = () => {
+    setIsTheaterMode((current) => {
+      const nextValue = !current;
+      if (nextValue) {
+        setIsChatCollapsed(true);
+      }
+      return nextValue;
+    });
+  };
+
+  const otherMembers = memberProfiles.filter((member) => member.participantId !== currentParticipantId);
+  const currentMemberName =
+    memberProfiles.find((member) => member.participantId === currentParticipantId)?.displayName || displayName || 'You';
 
   const getDriftColor = () => {
     if (drift < 0.5) return 'text-emerald-400';
@@ -290,12 +756,20 @@ function App() {
   };
 
   return (
-    <div className="app-shell">
+    <div
+      className={`app-shell ${isTheaterMode ? 'app-shell-theater' : ''}`}
+      style={
+        {
+          '--viewport-width': `${viewportSize.width}px`,
+          '--viewport-height': `${viewportSize.height}px`,
+        } as React.CSSProperties
+      }
+    >
       <div className="ambient-orb ambient-orb-one" aria-hidden="true" />
       <div className="ambient-orb ambient-orb-two" aria-hidden="true" />
       <div className="ambient-grid" aria-hidden="true" />
 
-      <header className="mx-auto mb-10 w-full max-w-[1480px] px-6 pt-8 sm:px-8 lg:px-12">
+      <header className={`page-chrome mx-auto mb-10 w-full max-w-[1480px] px-6 pt-8 sm:px-8 lg:px-12 ${isTheaterMode ? 'page-chrome-hidden' : ''}`}>
         <div className="chrome-panel flex flex-col gap-6 rounded-[32px] px-6 py-6 sm:px-8 lg:flex-row lg:items-center lg:justify-between">
           <div className="flex items-start gap-4">
             <div className="brand-mark">
@@ -335,7 +809,7 @@ function App() {
         </div>
       </header>
 
-      <main className="mx-auto flex w-full max-w-[1480px] flex-1 flex-col px-6 pb-10 sm:px-8 lg:px-12">
+      <main className={`main-shell mx-auto flex w-full max-w-[1480px] flex-1 flex-col px-6 pb-10 sm:px-8 lg:px-12 ${isTheaterMode ? 'main-shell-theater' : ''}`}>
         {!isJoined ? (
           <section className="grid flex-1 content-start gap-8 lg:grid-cols-[1.15fr_0.85fr] xl:gap-10">
             <div className="chrome-panel panel-feature rounded-[32px] p-8 sm:p-10 lg:p-12">
@@ -377,30 +851,55 @@ function App() {
                 </p>
                 <h2 className="section-title text-[var(--text-main)]">Enter your room code</h2>
                 <p className="text-base leading-7 text-[var(--text-muted)]">
-                  Use any room code you like. If it already exists, you&apos;ll jump back in. If not, a new room is created
-                  for you instantly.
+                  Pick your own room code and 6-digit PIN, or join with credentials someone shared with you.
                 </p>
               </div>
 
               <div className="mt-10 space-y-5">
                 <label className="block text-xs font-semibold uppercase tracking-[0.28em] text-[var(--text-muted)]">
+                  Your name
+                </label>
+                <input
+                  type="text"
+                  placeholder="Movie buddy"
+                  value={displayName}
+                  onChange={(e) => setDisplayName(e.target.value)}
+                  className="input-shell"
+                  maxLength={24}
+                />
+                <label className="block text-xs font-semibold uppercase tracking-[0.28em] text-[var(--text-muted)]">
                   Room code
                 </label>
                 <input
                   type="text"
-                  placeholder="movie-night"
+                  placeholder="ABCD2345"
                   value={roomId}
-                  onChange={(e) => setRoomId(e.target.value)}
+                  onChange={(e) => setRoomId(e.target.value.toUpperCase())}
                   className="input-shell"
                 />
-                <button type="button" onClick={handleJoin} className="primary-button w-full" disabled={!roomId}>
+                <label className="block text-xs font-semibold uppercase tracking-[0.28em] text-[var(--text-muted)]">
+                  Room PIN
+                </label>
+                <input
+                  type="password"
+                  placeholder="123456"
+                  value={roomPin}
+                  onChange={(e) => setRoomPin(e.target.value.replace(/\D/g, '').slice(0, 6))}
+                  className="input-shell"
+                  inputMode="numeric"
+                  maxLength={6}
+                />
+                <button type="button" onClick={handleCreateRoom} className="primary-button w-full" disabled={!roomId || !roomPin}>
+                  Create Room
+                </button>
+                <button type="button" onClick={handleJoin} className="secondary-button w-full" disabled={!roomId || !roomPin}>
                   Enter Room
                 </button>
               </div>
             </div>
           </section>
         ) : (
-          <section className="flex flex-1 flex-col gap-8">
+          <section className={`watch-section flex flex-1 flex-col gap-8 ${isTheaterMode ? 'watch-section-theater' : ''}`}>
             {!videoSrc ? (
               <div className="chrome-panel panel-upload flex min-h-[62vh] flex-col items-center justify-center rounded-[36px] border border-dashed border-[var(--border-color)] px-8 py-12 text-center">
                 <div className="upload-icon-shell">
@@ -425,37 +924,187 @@ function App() {
                 </div>
               </div>
             ) : (
-              <div className="grid gap-8 xl:grid-cols-[minmax(0,1fr)_360px]">
-                <div className="chrome-panel overflow-hidden rounded-[36px] p-3">
-                  <div className="video-frame">
-                    <video
-                      ref={videoRef}
-                      src={videoSrc}
-                      controls
-                      className="w-full aspect-video rounded-[28px] outline-none"
-                      onPlay={handlePlay}
-                      onPause={handlePause}
-                      onSeeked={handleSeeked}
-                    />
+              <div className={`watch-layout ${isTheaterMode ? 'watch-layout-theater' : ''}`}>
+                <div className={`player-stage ${isTheaterMode ? 'player-stage-theater' : ''}`}>
+                  <div className={`chrome-panel player-panel overflow-hidden rounded-[36px] p-3 ${isTheaterMode ? 'player-panel-theater' : ''}`}>
+                    <div className="video-frame">
+                      <video
+                        ref={videoRef}
+                        src={videoSrc}
+                        controls
+                        className={`w-full aspect-video rounded-[28px] outline-none ${isTheaterMode ? 'theater-video' : ''}`}
+                        onLoadedMetadata={() => showSubtitleTrack(videoRef.current, Boolean(subtitleSrc), subtitleLabel)}
+                        onPlay={handlePlay}
+                        onPause={handlePause}
+                        onSeeked={handleSeeked}
+                      >
+                        {subtitleSrc ? (
+                          <track
+                            key={subtitleSrc}
+                            src={subtitleSrc}
+                            kind="subtitles"
+                            srcLang="en"
+                            label={subtitleLabel ?? 'Uploaded subtitles'}
+                            default
+                          />
+                        ) : null}
+                      </video>
+                    </div>
+
+                    <div className="player-toolbar mt-4 rounded-[26px] bg-[var(--panel-strong)] px-4 py-4 sm:px-5">
+                      <div className="flex flex-wrap items-center gap-3">
+                        <button type="button" onClick={handleManualSync} className="secondary-button">
+                          <RefreshCw size={18} />
+                          <span>Force Sync</span>
+                        </button>
+
+                        <button
+                          type="button"
+                          onClick={handleTheaterToggle}
+                          className="secondary-button"
+                          aria-pressed={isTheaterMode}
+                        >
+                          {isTheaterMode ? <Minimize2 size={18} /> : <Maximize2 size={18} />}
+                          <span>{isTheaterMode ? 'Exit Theater' : 'Theater Mode'}</span>
+                        </button>
+                      </div>
+
+                      <div className="metric-pill">
+                        <span className="text-[11px] font-semibold uppercase tracking-[0.26em] text-[var(--text-muted)]">
+                          Drift
+                        </span>
+                        {drift > 0.5 && <AlertTriangle size={18} className={getDriftColor()} />}
+                        <span className={`font-mono text-lg font-bold ${getDriftColor()}`}>{drift.toFixed(2)}s</span>
+                      </div>
+                    </div>
                   </div>
 
-                  <div className="mt-4 flex flex-col gap-4 rounded-[26px] bg-[var(--panel-strong)] px-4 py-4 sm:flex-row sm:items-center sm:justify-between sm:px-5">
-                    <button type="button" onClick={handleManualSync} className="secondary-button">
-                      <RefreshCw size={18} />
-                      <span>Force Sync</span>
+                  <div
+                    className={`chat-shell ${isChatCollapsed ? 'chat-shell-collapsed' : ''} ${isTheaterMode ? 'chat-shell-theater' : ''}`}
+                  >
+                    <button
+                      type="button"
+                      className="chat-toggle"
+                      onClick={handleChatToggle}
+                      aria-expanded={!isChatCollapsed}
+                    >
+                      <div className="chat-toggle-main">
+                        <MessageSquare size={18} />
+                        {!isChatCollapsed ? <span>Room chat</span> : null}
+                      </div>
+                      <div className="chat-toggle-side">
+                        {unreadMessages > 0 ? <span className="chat-badge">{unreadMessages}</span> : null}
+                        {isChatCollapsed ? <ChevronLeft size={18} /> : <ChevronRight size={18} />}
+                      </div>
                     </button>
 
-                    <div className="metric-pill">
-                      <span className="text-[11px] font-semibold uppercase tracking-[0.26em] text-[var(--text-muted)]">
-                        Drift
-                      </span>
-                      {drift > 0.5 && <AlertTriangle size={18} className={getDriftColor()} />}
-                      <span className={`font-mono text-lg font-bold ${getDriftColor()}`}>{drift.toFixed(2)}s</span>
-                    </div>
+                    {!isChatCollapsed ? (
+                      <div className="chrome-panel chat-panel rounded-[32px] p-5">
+                        <div className="chat-panel-head">
+                          <div>
+                            <p className="eyebrow">
+                              <MessageSquare size={14} />
+                              <span>Live chat</span>
+                            </p>
+                            <h3 className="mt-3 text-2xl font-semibold tracking-tight text-[var(--text-main)]">
+                              Talk while you watch
+                            </h3>
+                          </div>
+                          <div className="metric-pill px-3 py-2">
+                            <UserRound size={16} />
+                            <span className="font-semibold text-[var(--text-main)]">{participantsCount}</span>
+                          </div>
+                        </div>
+
+                        <div ref={chatScrollRef} className="chat-log">
+                          {chatMessages.length > 0 ? (
+                            chatMessages.map((message) => {
+                              const isOwnMessage = message.participantId === currentParticipantId;
+
+                              return (
+                                <article
+                                  key={message.id}
+                                  className={`chat-message ${isOwnMessage ? 'chat-message-own' : ''}`}
+                                >
+                                  <div className="chat-message-meta">
+                                    <span className="chat-message-name">
+                                      {isOwnMessage ? 'You' : message.displayName}
+                                    </span>
+                                    <time className="chat-message-time">
+                                      {new Date(message.sentAt).toLocaleTimeString([], {
+                                        hour: 'numeric',
+                                        minute: '2-digit',
+                                      })}
+                                    </time>
+                                  </div>
+                                  <div className="chat-message-bubble">
+                                    {message.type === 'image' && message.imageDataUrl ? (
+                                      <img
+                                        src={message.imageDataUrl}
+                                        alt={`Shared by ${message.displayName}`}
+                                        className="chat-image"
+                                      />
+                                    ) : (
+                                      <p>{message.text}</p>
+                                    )}
+                                  </div>
+                                </article>
+                              );
+                            })
+                          ) : (
+                            <div className="chat-empty-state">
+                              <MessageSquare size={18} />
+                              <p>Say hi, react with emojis, or call out a favorite scene.</p>
+                            </div>
+                          )}
+                        </div>
+
+                        <div className="chat-compose">
+                          <textarea
+                            value={chatDraft}
+                            onChange={(e) => setChatDraft(e.target.value)}
+                            onKeyDown={handleChatKeyDown}
+                            placeholder="Type a message or drop an emoji 😄"
+                            className="chat-input"
+                            rows={3}
+                            maxLength={500}
+                          />
+                          <div className="chat-compose-row">
+                            <span className="chat-compose-hint">Enter sends, Shift+Enter adds a new line</span>
+                            <div className="chat-compose-actions">
+                              <button
+                                type="button"
+                                onClick={() => chatImageInputRef.current?.click()}
+                                className="secondary-button"
+                              >
+                                <ImagePlus size={16} />
+                                <span>Image</span>
+                              </button>
+                              <input
+                                ref={chatImageInputRef}
+                                type="file"
+                                accept="image/png,image/jpeg,image/gif,image/webp"
+                                onChange={handleChatImageChange}
+                                className="hidden"
+                              />
+                              <button
+                                type="button"
+                                onClick={handleSendChatMessage}
+                                className="primary-button"
+                                disabled={!chatDraft.trim()}
+                              >
+                                <SendHorizontal size={16} />
+                                <span>Send</span>
+                              </button>
+                            </div>
+                          </div>
+                        </div>
+                      </div>
+                    ) : null}
                   </div>
                 </div>
 
-                <aside className="flex flex-col gap-6">
+                <aside className={`sidebar-column flex flex-col gap-6 ${isTheaterMode ? 'sidebar-column-theater' : ''}`}>
                   {!isConnected && (
                     <div className="status-card status-card-offline">
                       <WifiOff size={24} />
@@ -492,13 +1141,98 @@ function App() {
                         </div>
                       </div>
 
+                      <div>
+                        <label className="block text-[11px] font-semibold uppercase tracking-[0.24em] text-[var(--text-muted)]">
+                          Room PIN
+                        </label>
+                        <div className="mt-2 rounded-[20px] border border-[var(--border-color)] bg-[var(--panel-quiet)] px-4 py-4 text-center font-mono text-lg font-semibold tracking-[0.12em] text-[var(--text-main)]">
+                          {roomPin}
+                        </div>
+                      </div>
+
+                      <div>
+                        <label className="block text-[11px] font-semibold uppercase tracking-[0.24em] text-[var(--text-muted)]">
+                          Your name
+                        </label>
+                        <div className="mt-2 flex flex-col gap-3 sm:flex-row">
+                          <input
+                            type="text"
+                            value={displayName}
+                            onChange={(e) => setDisplayName(e.target.value)}
+                            placeholder="Choose a chat name"
+                            className="input-shell flex-1 py-3 text-base"
+                            maxLength={24}
+                          />
+                          <button type="button" onClick={handleSaveDisplayName} className="secondary-button">
+                            Save
+                          </button>
+                        </div>
+                      </div>
+
                       <div className="role-banner role-banner-shared">
                         <Users size={18} />
                         <span>Everyone in this room can control playback</span>
                       </div>
+
+                      <div className="subtitle-card">
+                        <div className="flex items-start gap-3">
+                          <div className="subtitle-icon">
+                            <FileText size={16} />
+                          </div>
+                          <div className="min-w-0 flex-1">
+                            <p className="text-[11px] font-semibold uppercase tracking-[0.24em] text-[var(--text-muted)]">
+                              Subtitles
+                            </p>
+                            <p className="mt-2 text-sm leading-6 text-[var(--text-muted)]">
+                              Any viewer can add local `.vtt` or `.srt` subtitles for their own playback.
+                            </p>
+                            <p className="mt-3 truncate text-sm font-medium text-[var(--text-main)]">
+                              {subtitleLabel ?? 'No subtitle file loaded'}
+                            </p>
+                          </div>
+                        </div>
+
+                        <div className="mt-4 flex flex-wrap gap-3">
+                          <label className="secondary-button cursor-pointer">
+                            <Upload size={16} />
+                            <span>{subtitleLabel ? 'Replace Subs' : 'Add Subtitles'}</span>
+                            <input
+                              type="file"
+                              accept=".vtt,.srt,text/vtt,application/x-subrip"
+                              onChange={handleSubtitleChange}
+                              className="hidden"
+                            />
+                          </label>
+                          {subtitleSrc ? (
+                            <button type="button" onClick={clearSubtitleTrack} className="secondary-button">
+                              Remove
+                            </button>
+                          ) : null}
+                        </div>
+                      </div>
                     </div>
 
                     <div className="mt-8 space-y-4 text-sm text-[var(--text-muted)]">
+                      <div className="member-strip">
+                        <div className="member-strip-header">
+                          <span className="text-[11px] font-semibold uppercase tracking-[0.24em] text-[var(--text-muted)]">
+                            In the room
+                          </span>
+                          <span className="text-sm font-medium text-[var(--text-main)]">{currentMemberName}</span>
+                        </div>
+                        <div className="member-chip-row">
+                          {otherMembers.length > 0 ? (
+                            otherMembers.map((member) => (
+                              <span key={member.participantId} className="member-chip">
+                                {member.displayName}
+                              </span>
+                            ))
+                          ) : (
+                            <span className="text-sm text-[var(--text-muted)]">Waiting for someone else to join.</span>
+                          )}
+                        </div>
+                      </div>
+
                       <div className="feature-row">
                         <span className="feature-dot" />
                         <span>Low-latency room sync across connected viewers</span>
@@ -520,7 +1254,7 @@ function App() {
         )}
       </main>
 
-      <footer className="mx-auto mt-auto w-full max-w-[1480px] px-6 pb-6 text-center text-sm text-[var(--text-muted)] sm:px-8 lg:px-12">
+      <footer className={`page-chrome mx-auto mt-auto w-full max-w-[1480px] px-6 pb-6 text-center text-sm text-[var(--text-muted)] sm:px-8 lg:px-12 ${isTheaterMode ? 'page-chrome-hidden' : ''}`}>
         <div className="chrome-panel flex flex-col items-center justify-between gap-2 rounded-[26px] px-5 py-4 sm:flex-row">
           <p className="text-xs uppercase tracking-[0.26em] text-[var(--text-soft)]">&copy; 2026 nickcardoso</p>
           <a

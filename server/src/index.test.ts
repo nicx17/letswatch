@@ -1,92 +1,164 @@
-import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest';
-import { createServer } from 'http';
-import { Server } from 'socket.io';
-import { io as Client, Socket } from 'socket.io-client';
-import { server, rooms, isRateLimited } from './index.js';
+import { beforeEach, describe, expect, it } from 'vitest';
+import {
+  applySyncStateForSocket,
+  createRoomForSocket,
+  isRateLimited,
+  joinRoomForSocket,
+  resetRuntimeState,
+  rooms,
+  sendChatMessageForSocket,
+} from './index.js';
 
-describe('Server Socket Logic Tests', () => {
-  let clientSocket1: Socket;
-  let clientSocket2: Socket;
-  
-  beforeAll(async () => {
-    // Start listening on a random port for testing
-    await new Promise<void>((resolve) => {
-      server.listen(0, '127.0.0.1', () => {
-        const address = server.address();
-        if (!address || typeof address === 'string') {
-          throw new Error('Server did not provide a usable test address');
-        }
-
-        clientSocket1 = Client(`http://127.0.0.1:${address.port}`);
-        clientSocket2 = Client(`http://127.0.0.1:${address.port}`);
-        
-        let connectCount = 0;
-        const checkDone = () => {
-          connectCount++;
-          if (connectCount === 2) resolve();
-        };
-
-        clientSocket1.on('connect', checkDone);
-        clientSocket2.on('connect', checkDone);
-      });
-    });
-  });
-
-  afterAll(() => {
-    clientSocket1?.disconnect();
-    clientSocket2?.disconnect();
-    server.close();
-  });
-
+describe('Server Room Logic', () => {
   beforeEach(() => {
-    // Clean up rooms before each test
-    rooms.clear();
+    resetRuntimeState();
   });
 
-  it('should create a room and include the creator as a participant', async () => {
-    await new Promise<void>((resolve) => {
-      clientSocket1.emit('join_room', 'test_room_1', (res: any) => {
-        expect(res.success).toBe(true);
-        expect(res.participants).toContain(clientSocket1.id);
-        expect(rooms.get('test_room_1')?.participants).toContain(clientSocket1.id);
-        resolve();
-      });
+  it('creates a room with generated credentials and an opaque participant id', () => {
+    const result = createRoomForSocket('socket-1', {
+      roomId: 'MOVIENGT',
+      pin: '123456',
+      displayName: 'Creator',
     });
+
+    expect(result.success).toBe(true);
+    if (!result.success) return;
+
+    expect(result.roomId).toBe('MOVIENGT');
+    expect(result.pin).toBe('123456');
+    expect(result.selfParticipantId).toBeTypeOf('string');
+    expect(result.participants).toContain(result.selfParticipantId);
+    expect(rooms.get(result.roomId)?.participants).toContain('socket-1');
   });
 
-  it('should ignore sync_state with invalid Zod payload (e.g. negative timestamp)', async () => {
-    await new Promise<void>((resolve) => {
-      clientSocket1.emit('join_room', 'test_room_2', () => {
-        clientSocket1.emit('sync_state', 'test_room_2', { position: 10, playing: true });
-        
-        setTimeout(() => {
-          expect(rooms.get('test_room_2')?.state.position).toBe(10);
-          clientSocket1.emit('sync_state', 'test_room_2', { position: -15, playing: false });
-          
-          setTimeout(() => {
-            expect(rooms.get('test_room_2')?.state.position).toBe(10);
-            expect(rooms.get('test_room_2')?.state.playing).toBe(true);
-            resolve();
-          }, 50);
-        }, 50);
-      });
+  it('joins a room only when the correct pin is provided', () => {
+    const created = createRoomForSocket('socket-1', {
+      roomId: 'PINCHECK',
+      pin: '654321',
+      displayName: 'Host',
     });
-  });
+    expect(created.success).toBe(true);
+    if (!created.success) return;
 
-  it('should allow any participant in the room to send sync_state', async () => {
-    await new Promise<void>((resolve) => {
-      clientSocket1.emit('join_room', 'test_room_x', () => {
-        clientSocket2.emit('join_room', 'test_room_x', () => {
-          clientSocket2.emit('sync_state', 'test_room_x', { position: 999, playing: true });
-          
-          setTimeout(() => {
-            expect(rooms.get('test_room_x')?.state.position).toBe(999);
-            expect(rooms.get('test_room_x')?.state.playing).toBe(true);
-            resolve();
-          }, 50);
-        });
-      });
+    const denied = joinRoomForSocket('socket-2', {
+      roomId: created.roomId,
+      pin: '000000',
+      displayName: 'Guest',
     });
+    expect(denied.success).toBe(false);
+    if (denied.success) return;
+    expect(denied.error).toContain('PIN');
+
+    const allowed = joinRoomForSocket('socket-2', {
+      roomId: created.roomId,
+      pin: created.pin,
+      displayName: 'Guest',
+    });
+    expect(allowed.success).toBe(true);
+    if (!allowed.success) return;
+    expect(allowed.memberProfiles).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ displayName: 'Host' }),
+        expect.objectContaining({ displayName: 'Guest' }),
+      ]),
+    );
   });
 
+  it('ignores invalid sync payloads and accepts valid participant updates', () => {
+    const created = createRoomForSocket('socket-1', {
+      roomId: 'SYNCROOM',
+      pin: '123456',
+      displayName: 'Alpha',
+    });
+    expect(created.success).toBe(true);
+    if (!created.success) return;
+
+    const firstSync = applySyncStateForSocket('socket-1', created.roomId, { position: 10, playing: true });
+    expect(firstSync.success).toBe(true);
+    expect(rooms.get(created.roomId)?.state.position).toBe(10);
+
+    const invalidSync = applySyncStateForSocket('socket-1', created.roomId, { position: -15, playing: false });
+    expect(invalidSync.success).toBe(false);
+    expect(rooms.get(created.roomId)?.state.position).toBe(10);
+    expect(rooms.get(created.roomId)?.state.playing).toBe(true);
+  });
+
+  it('allows another participant in the room to update playback state', () => {
+    const created = createRoomForSocket('socket-1', {
+      roomId: 'SHARED01',
+      pin: '123456',
+      displayName: 'Aster',
+    });
+    expect(created.success).toBe(true);
+    if (!created.success) return;
+
+    const joined = joinRoomForSocket('socket-2', {
+      roomId: created.roomId,
+      pin: created.pin,
+      displayName: 'Briar',
+    });
+    expect(joined.success).toBe(true);
+
+    const sync = applySyncStateForSocket('socket-2', created.roomId, { position: 999, playing: true });
+    expect(sync.success).toBe(true);
+    expect(rooms.get(created.roomId)?.state.position).toBe(999);
+    expect(rooms.get(created.roomId)?.state.playing).toBe(true);
+  });
+
+  it('broadcasts ephemeral chat messages without storing history in rooms', () => {
+    const created = createRoomForSocket('socket-1', {
+      roomId: 'CHATROOM',
+      pin: '123456',
+      displayName: 'Nova',
+    });
+    expect(created.success).toBe(true);
+    if (!created.success) return;
+
+    const joined = joinRoomForSocket('socket-2', {
+      roomId: created.roomId,
+      pin: created.pin,
+      displayName: 'Kai',
+    });
+    expect(joined.success).toBe(true);
+
+    const chat = sendChatMessageForSocket('socket-1', created.roomId, {
+      type: 'text',
+      text: 'hello there 😊',
+    });
+    expect(chat.success).toBe(true);
+    if (!chat.success) return;
+
+    expect(chat.message.displayName).toBe('Nova');
+    expect(chat.message.type).toBe('text');
+    expect(chat.message.text).toBe('hello there 😊');
+    expect(chat.message.participantId).toBeTruthy();
+    expect(rooms.get(created.roomId)).not.toHaveProperty('messages');
+  });
+
+  it('still exposes the lightweight per-socket rate limiter as process-local state', () => {
+    let limited = false;
+    for (let i = 0; i < 16; i += 1) {
+      limited = isRateLimited('socket-rate');
+    }
+
+    expect(limited).toBe(true);
+  });
+
+  it('rejects duplicate room codes on create', () => {
+    const first = createRoomForSocket('socket-1', {
+      roomId: 'DUPLIC8',
+      pin: '123456',
+      displayName: 'Host',
+    });
+    expect(first.success).toBe(true);
+
+    const duplicate = createRoomForSocket('socket-2', {
+      roomId: 'DUPLIC8',
+      pin: '654321',
+      displayName: 'Guest',
+    });
+    expect(duplicate.success).toBe(false);
+    if (duplicate.success) return;
+    expect(duplicate.error).toContain('already in use');
+  });
 });

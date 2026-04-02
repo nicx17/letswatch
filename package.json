@@ -8,5 +8,8 @@
     "build": "npm --prefix client run build && npm --prefix server run build",
     "build:all": "npm run build",
     "start": "cd server && npm run start"
+  },
+  "dependencies": {
+    "all": "^0.0.0"
   }
 }
