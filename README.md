@@ -74,6 +74,12 @@ npm run test # OR npx vitest run
 Read the full security implementation breakdown mapping our App-Level Shields and Runtime Defenses within [SECURITY.md](SECURITY.md).
 
 ---
+
+## Deployment
+
+Check out [DEPLOYMENT.md](DEPLOYMENT.md) for deploying to Production, hooking up environment variables, and properly routing the WebSocket server.
+
+---
 ## Attribution
   <p>
     <a href="https://unsplash.com/illustrations/a-blue-and-orange-circle-with-an-orange-spiral-in-the-center-_B2A99CU0bA?utm_source=unsplash&utm_medium=referral&utm_content=creditCopyText">Illustration</a> by <a href="https://unsplash.com/@sigmund/illustrations?utm_source=unsplash&utm_medium=referral&utm_content=creditCopyText">Compagnons</a> on <a href="https://unsplash.com/illustrations?utm_source=unsplash&utm_medium=referral&utm_content=creditCopyText">Unsplash</a>
