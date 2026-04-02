@@ -2,49 +2,65 @@
 
 Since both the React client and the Node backend will be hosted on the same server, the deployment architecture is unified. The Node.js Express server is configured to serve the React frontend as static files alongside the WebSocket server.
 
-## 1. Setup and Build
+## 🔴 IMPORTANT: The Build Step
 
-1. Clone your repository to the server.
-2. Install dependencies and build the frontend codebase correctly into `client/dist`:
+You MUST build the frontend before starting the server. If you skip this, the server will have no HTML/JS files to serve at `client/dist`.
+
+### Step-by-Step Command Guide:
+
+1. **Clone your repository to the server:**
+   ```bash
+   git clone https://github.com/nicx17/letswatch.git
+   cd letswatch
+   ```
+
+2. **Build the React Frontend:**
+   The backend statically serves `/client/dist`. You must generate this folder:
    ```bash
    cd client
    npm install
    npm run build
    ```
+   *(This takes all your React code and minifies it into static, production-ready files).*
 
-3. Install the server dependencies:
+3. **Prepare the Node Backend:**
    ```bash
    cd ../server
    npm install
    ```
+   *(We use `tsx` to run the backend natively in TypeScript without needing a separate backend build step!)*
 
-## 2. Server Environment
+---
 
-Inside the `server/` directory, create a `.env` file from the example:
+## Server Environment Configuration
+
+Inside the `server/` directory, copy the example variables:
 ```bash
 cp .env.example .env
 ```
 
-Your `.env` should look like this:
+Edit your `server/.env` to secure your domain:
 ```env
 PORT=4000
 NODE_ENV=production
 APP_URL=https://letswatch.hyclotron.com
 ```
 
-*Note: Since the server directly serves the static files in production, you do not need to configure `VITE_SOCKET_URL` in the frontend `client/`. The `import.meta.env.PROD` flag will automatically bind the socket connection to `window.location.origin` out of the box when you build it!*
+*Note: Since the server directly serves the static files in production, you do not need to configure `VITE_SOCKET_URL` in the frontend `client/`. The `import.meta.env.PROD` flag will automatically bind the socket connection to `window.location.origin` out of the box!*
 
-## 3. Run It
+---
 
-The Node server will now intercept all API / socket events, and default everything else back to the React app serving your HTML.
+## 🚀 Run It
 
-Deploy using `pm2` or systemd:
+The Node server will now intercept all API / socket events, and seamlessly default everything else back to the React `dist` folder.
+
+Deploy using `pm2` to keep it running forever in the background:
 ```bash
-cd server
+# Assuming you are still in the `server/` directory:
 npm install -g pm2
 pm2 start "npm run start" --name letswatch-unified
 ```
 
-## Security Reminders!
+## Security Reminders
 - ✅ **Helmet Content Security Policy (CSP)** is configured to explicitly allow reading native Local Blobs (`blob:`) so that your `video/mp4` streams render completely offline.
 - ✅ **Host Verification**: The `APP_URL` inside `.env` will explicitly map trust to your custom domain `letswatch.hyclotron.com`.
