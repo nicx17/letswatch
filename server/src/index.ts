@@ -124,11 +124,6 @@ io.on('connection', (socket) => {
     const room = rooms.get(roomId);
     if (!room) return;
 
-    // Security Enhancement: Only the leader can send sync events to prevent an "Anarchy" exploit.
-    if (room.leaderId !== socket.id) {
-       return; // Optional: Disconnect or warn user.
-    }
-
     // State type validation using Zod
     const result = SeekSchema.safeParse(update);
     if (!result.success) return; // Ignore malicious/malformed data

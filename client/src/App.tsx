@@ -150,7 +150,7 @@ function App() {
         ignoreEvents.current.play = false;
         return;
     }
-    if (socket && isJoined && videoRef.current && isLeader) {
+    if (socket && isJoined && videoRef.current) {
       socket.emit('sync_state', roomId, { 
         position: videoRef.current.currentTime, 
         playing: true 
@@ -163,7 +163,7 @@ function App() {
         ignoreEvents.current.pause = false;
         return;
     }
-    if (socket && isJoined && videoRef.current && isLeader) {
+    if (socket && isJoined && videoRef.current) {
       socket.emit('sync_state', roomId, { 
         position: videoRef.current.currentTime, 
         playing: false 
@@ -176,7 +176,7 @@ function App() {
         ignoreEvents.current.seek = false;
         return;
     }
-    if (socket && isJoined && videoRef.current && isLeader) {
+    if (socket && isJoined && videoRef.current) {
       socket.emit('sync_state', roomId, {
         position: videoRef.current.currentTime,
         playing: !videoRef.current.paused
@@ -372,7 +372,7 @@ function App() {
                      </div>
                      
                      <div className="space-y-5 text-[1.1rem] text-[var(--text-muted)] font-medium mt-12">
-                       <div className="flex items-center gap-4"><div className="w-2.5 h-2.5 rounded-full bg-[var(--text-main)]"></div> Leader-sync enabled</div>
+                       <div className="flex items-center gap-4"><div className="w-2.5 h-2.5 rounded-full bg-[var(--text-main)]"></div> Co-op sync enabled</div>
                        <div className="flex items-center gap-4"><div className="w-2.5 h-2.5 rounded-full bg-[var(--text-main)]"></div> End-to-end WebSocket</div>
                        <div className="flex items-center gap-4"><div className="w-2.5 h-2.5 rounded-full bg-[var(--text-main)]"></div> Local blob full-quality</div>
                      </div>
