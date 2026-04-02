@@ -161,11 +161,12 @@ io.on('connection', (socket) => {
 
 // Serve frontend in production
 if (process.env.NODE_ENV === 'production') {
-  const clientBuildPath = path.join(__dirname, '../../client/dist');
+  // Since __dirname points to server/src when running tsx, we resolve to ../../client/dist
+  const clientBuildPath = path.resolve(__dirname, '../../client/dist');
   app.use(express.static(clientBuildPath));
 
   app.get(/.*/, (req, res) => {
-    res.sendFile(path.join(clientBuildPath, 'index.html'));
+    res.sendFile(path.resolve(clientBuildPath, 'index.html'));
   });
 }
 
