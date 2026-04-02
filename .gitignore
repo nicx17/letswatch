@@ -1,0 +1,20 @@
+node_modules/
+dist/
+build/
+.env
+.env.*
+!.env.example
+.DS_Store
+coverage/
+.vscode/
+
+# Logs
+logs
+*.log
+npm-debug.log*
+
+# OS Files
+Thumbs.ds
+compagnons-_B2A99CU0bA-unsplash.png
+compagnons-_B2A99CU0bA-unsplash.svg
+plan.md

@@ -1,0 +1,49 @@
+@import "tailwindcss";
+
+:root {
+    --bg-primary: #FAF9F6;
+    --bg-secondary: #FFFFFF;
+    --text-main: #2D2D2D;
+    --text-muted: #555555;
+    --border-color: #E5E3DB;
+    --border-hover: #D0CEC4;
+    --accent: #2D2D2D;
+    --accent-hover: #2D2D2D;
+    --accent-text: #FFFFFF;
+    --card-shadow: 0 12px 32px rgba(0, 0, 0, 0.05);
+}
+
+html.dark {
+    --bg-primary: #161616;
+    --bg-secondary: #1F1F1F;
+    --text-main: #F4F4F4;
+    --text-muted: #A1A1AA;
+    --border-color: #333333;
+    --border-hover: #4D4D4D;
+    --accent: #FFFFFF;
+    --accent-hover: #E0E0E0;
+    --accent-text: #121212;
+    --card-shadow: 0 12px 32px rgba(0, 0, 0, 0.4);
+}
+
+@theme {
+    --font-sans: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    --font-serif: ui-serif, Georgia, Cambria, "Times New Roman", Times, serif;
+    --color-bg-primary: var(--bg-primary);
+    --color-bg-secondary: var(--bg-secondary);
+    --color-text-main: var(--text-main);
+    --color-text-muted: var(--text-muted);
+    --color-border-main: var(--border-color);
+    --color-border-hover: var(--border-hover);
+    --color-accent: var(--accent);
+    --color-accent-hover: var(--accent-hover);
+    --color-accent-text: var(--accent-text);
+}
+
+body {
+    background-color: var(--bg-primary);
+    color: var(--text-main);
+    font-family: var(--font-sans);
+    transition: background-color 0.2s ease, color 0.2s ease;
+}
+
