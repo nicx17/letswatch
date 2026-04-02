@@ -1,60 +1,82 @@
-# SyncPlay Security Architecture & Features
+# Security Notes
 
-SyncPlay is designed with a **"Decentralized Data, Centralized Control"** architecture. While video playback depends entirely on the user's local filesystem (meaning zero raw video data flows through our infrastructure), the synchronization layer requires real-time persistent and bi-directional WebSocket connections. 
+## Scope
 
-To harden the Raspberry Pi 5 node and ensure robust real-time communication without exposing the system to abuse, we have implemented an **"Onion"** security strategy, layering HTTP hardening, packet sanitization, Rate Limiting, and Role-Based Access Control (RBAC).
+Lets Watch is designed around a local-first media model:
 
-Here is a detailed breakdown of all the active security features deployed in the project:
+- Video files stay on each participant's machine.
+- The server only stores room metadata and playback state in memory.
+- No database, file upload pipeline, or persistent media storage is part of the current architecture.
 
-## 1. Application-Level HTTP Shield 
+That keeps the data surface small, but it does not eliminate the need for runtime hardening on the sync layer.
 
-Our Node.js Express server acts as the gateway to the Socket.io WebSocket server. We have secured this layer using modern middleware standardizations:
+## Controls Currently Implemented
 
-- **Helmet.js Integration:** The `helmet()` middleware automatically establishes foundational security headers to mitigate common web vulnerabilities.
-  - **XSS Protection (`X-XSS-Protection`)**: Prevents maliciously mapped cross-site scripts.
-  - **Frameguard (`X-Frame-Options`)**: Completely denies iframe rendering (`DENY` or `SAMEORIGIN`), killing Clickjacking vectors outright.
-  - **Content Security Policy (CSP)**: Ensures scripts only execute from our origin, blocking unsanctioned foreign scripts if injected.
-  - **Sniffing Protection (`X-Content-Type-Options`)**: Prevents browsers from confusing our packet MIME types.
-- **Strict CORS Policies**: Express and Socket.io Cross-Origin Resource Sharing is completely deterministic. It actively prohibits wildcard (`origin: "*"`) requests. Connections uniquely accept valid local loopbacks during development (`http://localhost:5173`, `http://127.0.0.1:5173`) and resolve strict Production App URLs via the `process.env.APP_URL` environmental boundary.
+### HTTP and Browser-Facing Headers
 
-## 2. Real-Time Socket.io Hardening
+The Express server uses `helmet` to set security-focused response headers and a custom CSP that still allows:
 
-Because Socket.io establishes raw persistent full-duplex pipes natively open to the browser's developer tools, validating incoming JSON payloads against arbitrary tampering is critical.
+- local media playback from `blob:`
+- inline styles used by the current frontend
+- Cloudflare Insights scripts if they are enabled
 
-### Zod Schema Packet Validation 
-Never trust arbitrary inbound socket traffic. Hackers often try to inject non-numerical or infinite objects (`NaN`, raw strings, SQL injects) into a `position` parameter to computationally bottleneck or panic the active Express runtime.
+The server also enables `compression` for text-based responses.
 
-Every incoming `sync_state` event is forced through strict structural runtime checks via the `Zod` validation library:
-```typescript
-const SeekSchema = z.object({
-  position: z.number().nonnegative(),
-  playing: z.boolean(),
-});
-...
-const result = SeekSchema.safeParse(update);
-if (!result.success) return; // Silent reject without crashing the Node process
-```
-If an event payload deviates from a strict non-negative boolean structure, we silently ignore the packet. 
+### Input Validation
 
-### Socket Rate Limiting (Button Mashing Mitigation)
-To prevent **"Intentional Desync"** or DDoS attacks—where a malicious user writes a script to spam the Socket server thousands of times a second with `play`/`pause` pinging logic—we built an isolated time-window based Rate Limiting engine logic via an in-memory `Map`.
-- Users are computationally restricted to **15 actions per 2 seconds**. 
-- If a single `socket.id` breaches this threshold, the server mutes and drops subsequent packets from that specific client until their timer `resetAt` clears, preserving the integrity and frame-rate for the rest of the room.
+Incoming `sync_state` payloads are validated with Zod before room state is updated. This prevents malformed payloads from being written into the shared in-memory state map.
 
-### Leader-Enforced Authority (Anarchy Exploit Prevention)
-Our room logic employs a strict Master (Leader) / Viewer (Spectator) relationship array map. If a non-leader intercepts the `sync_state` event header and tries to dictate playback across the array, they are locked out natively. 
-- *Backend logic:* `if (room.leaderId !== socket.id) return;` completely shutters unauthorized state changes originating from arbitrary guests.
-- *Frontend logic:* To preserve network bandwidth, we double-check `if (isLeader)` cleanly before the client ever attempts to generate an `emit`. This protects the backend from processing unnecessary, destined-to-fail logic queues from non-host guests.
+### Room Membership And Leader Enforcement
 
-## 3. Disconnection & State Recovery 
-A common exploit or frustration in WebSocket lobbies stems from ghost-connections failing to deregister, confusing the participant arrays over hours or days.
-- If an edge-disconnection occurs, the frontend inherently detects the broken heartbeat, natively transitioning the user into a graceful visual **"Disconnected"** fallback state instead of leaving an unresponsive player. 
-- When the socket automatically background re-connects, it triggers a `handleReconnect` background loop—immediately pushing a quiet `join_room` to fetch updated backend states, and avoiding ghost sessions or hanging rooms.
-- **Leader Handoff:** If the Host explicitly leaves, the room doesn't stall indefinitely. The backend strips them from the array and bumps the authority to `participants[0]`, broadcasting a `leader_changed` event seamlessly so playback control is not lost.
+Room-scoped events now require the socket to be part of the room. Playback updates are additionally restricted to the current room leader, which keeps viewer clients from overwriting shared state.
 
-## 4. Runtime & Dependency Security
-- **Deprecation Clearing:** Our Node instance explicitly utilizes the `tsx` wrapper instead of legacy `ts-node`. Node warnings like `--experimental-loader` and native pathing flaws have been completely patched to prevent runtime memory leaks or deprecation halts scaling out.
-- **Native Test Coverages:** We run automated Vitest regression suites against the Server Room Logic to prove out:
-  1. Valid payload mapping & leader assignments.
-  2. The failure and nullification of negative-timestamp injections.
-  3. Strict drops of anarchy (Spectator) payload overrides.
+### Rate Limiting
+
+The backend keeps a lightweight per-socket rate-limit window for room events. It is intentionally simple and in-memory, which makes it suitable for a single-process deployment but not for distributed rate limiting across multiple instances.
+
+### Room Cleanup
+
+Room membership is cleaned up on disconnect. Empty rooms are deleted, and leadership is reassigned to the next participant when the current leader leaves.
+
+### Static Asset Caching
+
+Production static files are served with cache settings that match their role:
+
+- fingerprinted assets under `/assets` are cached long-term
+- `index.html` is intentionally not cached
+
+## Important Limitations
+
+These are not hidden footnotes. They are the current boundaries of the implementation and should be considered before exposing the service publicly.
+
+### Room Access Is Based On Knowing The Room ID
+
+There is no server-side authentication, password, or signed join token today. Anyone who can connect to the server and guess or obtain a room ID can attempt to interact with that room.
+
+### CORS Is Not Authorization
+
+The project configures CORS for Express and Socket.IO polling requests, but CORS does not stop non-browser clients from reaching the backend. Socket.IO's WebSocket transport is also not governed by browser CORS in the same way. Treat CORS here as browser configuration, not as access control.
+
+### Rate Limiting Is Process-Local
+
+The current limiter uses an in-memory `Map`. It resets on restart and does not coordinate across replicas.
+
+### State Is Ephemeral
+
+All room state lives in memory. Restarting the server clears active rooms.
+
+## Recommended Next Security Steps
+
+- Add room authentication such as a PIN, invite token, or signed join payload.
+- Move rate limiting to a shared store if the service is scaled horizontally.
+- Add structured logging and alerting around rejected payloads and abuse spikes.
+
+## Repository Security Workflow
+
+The repo now includes:
+
+- CI checks for lint, test, and build
+- CodeQL scanning for JavaScript and TypeScript
+- dependency review checks on pull requests
+
+Together, those workflows help catch regressions early, but they do not replace application-layer authorization and threat modeling.

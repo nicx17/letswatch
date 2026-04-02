@@ -1,66 +1,101 @@
-# Deployment Guide (Unified Server)
+# Deployment Guide
 
-Since both the React client and the Node backend will be hosted on the same server, the deployment architecture is unified. The Node.js Express server is configured to serve the React frontend as static files alongside the WebSocket server.
+## Overview
 
-## 🔴 IMPORTANT: The Build Step
+Lets Watch is deployed as a unified Node application:
 
-You MUST build the frontend before starting the server. If you skip this, the server will have no HTML/JS files to serve at `client/dist`.
+- the React app is built into `client/dist`
+- the Express server serves that frontend in production
+- Socket.IO runs from the same Node process
 
-### Step-by-Step Command Guide:
+## 1. Prepare The Server
 
-1. **Clone your repository to the server:**
-   ```bash
-   git clone https://github.com/nicx17/letswatch.git
-   cd letswatch
-   ```
+Clone the repository and install dependencies:
 
-2. **Build the React Frontend:**
-   The backend statically serves `/client/dist`. You must generate this folder:
-   ```bash
-   cd client
-   npm install
-   npm run build
-   ```
-   *(This takes all your React code and minifies it into static, production-ready files).*
-
-3. **Prepare the Node Backend:**
-   ```bash
-   cd ../server
-   npm install
-   ```
-   *(We use `tsx` to run the backend natively in TypeScript without needing a separate backend build step!)*
-
----
-
-## Server Environment Configuration
-
-Inside the `server/` directory, copy the example variables:
 ```bash
-cp .env.example .env
+git clone https://github.com/nicx17/letswatch.git
+cd letswatch
+npm run install:all
 ```
 
-Edit your `server/.env` to secure your domain:
+## 2. Configure Environment Variables
+
+Create the backend environment file:
+
+```bash
+cp server/.env.example server/.env
+```
+
+Set the production values:
+
 ```env
 PORT=4000
 NODE_ENV=production
-APP_URL=https://letswatch.hyclotron.com
+APP_URL=https://letswatch.example.com
 ```
 
-*Note: Since the server directly serves the static files in production, you do not need to configure `VITE_SOCKET_URL` in the frontend `client/`. The `import.meta.env.PROD` flag will automatically bind the socket connection to `window.location.origin` out of the box!*
+Only create `client/.env` when the frontend must point at a different backend origin. For the unified deployment model, the client can use the default production fallback of `window.location.origin`.
 
----
+## 3. Build The Frontend
 
-## 🚀 Run It
+Build the frontend bundle before starting the server:
 
-The Node server will now intercept all API / socket events, and seamlessly default everything else back to the React `dist` folder.
-
-Deploy using `pm2` to keep it running forever in the background:
 ```bash
-# Assuming you are still in the `server/` directory:
-npm install -g pm2
-pm2 start "npm run start" --name letswatch-unified
+npm run build
 ```
 
-## Security Reminders
-- ✅ **Helmet Content Security Policy (CSP)** is configured to explicitly allow reading native Local Blobs (`blob:`) so that your `video/mp4` streams render completely offline.
-- ✅ **Host Verification**: The `APP_URL` inside `.env` will explicitly map trust to your custom domain `letswatch.hyclotron.com`.
+Notes:
+
+- the client package produces `client/dist`
+- the server package does not emit a separate runtime bundle today; its `build` command is a TypeScript validation step
+
+## 4. Start The Application
+
+Run the backend from the `server/` package:
+
+```bash
+cd server
+npm run start
+```
+
+The production process expects `client/dist` to already exist.
+
+## 5. Process Management
+
+Using `pm2` is a straightforward way to keep the server alive:
+
+```bash
+pm2 start "npm --prefix /path/to/letswatch/server run start" --name letswatch
+pm2 save
+```
+
+## 6. Reverse Proxy Notes
+
+If you run the app behind Nginx, Caddy, or another reverse proxy:
+
+- forward normal HTTP traffic to the Node port
+- forward WebSocket upgrade requests to the same port
+- terminate TLS at the proxy or upstream load balancer
+- keep `APP_URL` aligned with the externally visible origin
+
+## 7. Verification Checklist
+
+After deployment, verify:
+
+- the frontend loads successfully from the public origin
+- the browser can connect to Socket.IO
+- a room can be created and joined from two devices
+- the `client/dist` assets are being served
+- `index.html` is returning fresh cache headers after a deploy
+
+## CI And Release Hygiene
+
+Before promoting changes, run:
+
+```bash
+npm run lint
+npm run test
+npm run build
+```
+
+The GitHub Actions workflows mirror those same commands so local validation and CI stay aligned.

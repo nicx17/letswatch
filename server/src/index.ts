@@ -14,7 +14,8 @@ const __dirname = path.dirname(__filename);
 
 const app = express();
 
-app.use(compression()); // Gzip compress text, JS, CSS, JSON
+// Compress static assets and JSON responses before they leave the server.
+app.use(compression());
 
 app.use(helmet({
   contentSecurityPolicy: {
@@ -29,24 +30,42 @@ app.use(helmet({
       upgradeInsecureRequests: null,
     },
   }
-})); // Configured Security headers to support local video blobs
+}));
 
-const getAllowedOrigins = () => {
-  if (process.env.NODE_ENV !== 'production') return '*';
-  const appUrl = process.env.APP_URL ? process.env.APP_URL.replace(/\/$/, '') : '*';
-  return [appUrl, appUrl.replace('https://', 'http://')]; // Support HTTPS and HTTP
+const isProduction = process.env.NODE_ENV === 'production';
+
+const getProductionOrigin = () => {
+  if (!isProduction) return null;
+
+  const appUrl = process.env.APP_URL?.trim();
+  if (!appUrl) {
+    throw new Error('APP_URL must be set when NODE_ENV=production');
+  }
+
+  return new URL(appUrl).origin;
 };
 
+const productionOrigin = getProductionOrigin();
+const corsOrigin = productionOrigin ? [productionOrigin] : '*';
+
 app.use(cors({
-  origin: getAllowedOrigins(),
+  origin: corsOrigin,
   methods: ['GET', 'POST']
 }));
 
 const server = createServer(app);
 const io = new Server(server, {
   cors: {
-    origin: getAllowedOrigins(),
+    origin: corsOrigin,
     methods: ['GET', 'POST'],
+  },
+  allowRequest: (req, callback) => {
+    if (!productionOrigin) {
+      callback(null, true);
+      return;
+    }
+
+    callback(null, req.headers.origin === productionOrigin);
   },
 });
 
@@ -65,7 +84,7 @@ interface SyncSession {
 
 export const rooms = new Map<string, SyncSession>();
 
-// Basic Rate Limiting Structure (10 requests / 2 seconds)
+// Keep a lightweight per-socket budget to avoid noisy clients spamming room events.
 const rateLimits = new Map<string, { count: number, resetAt: number }>();
 export const isRateLimited = (socketId: string) => {
   const now = Date.now();
@@ -75,13 +94,17 @@ export const isRateLimited = (socketId: string) => {
     rateLimits.set(socketId, record);
   }
   record.count++;
-  return record.count > 15; // Allow 15 events per 2 seconds max
+  return record.count > 15;
 };
 
 export const SeekSchema = z.object({
   position: z.number().nonnegative(),
   playing: z.boolean(),
 });
+
+const isRoomParticipant = (room: SyncSession, socketId: string) => {
+  return room.participants.includes(socketId);
+};
 
 io.on('connection', (socket) => {
   console.log('User connected:', socket.id);
@@ -95,6 +118,7 @@ io.on('connection', (socket) => {
 
     let room = rooms.get(roomId);
     if (!room) {
+      // The first participant becomes the room leader and seeds the shared state.
       room = {
         id: roomId,
         leaderId: socket.id,
@@ -108,17 +132,22 @@ io.on('connection', (socket) => {
       rooms.set(roomId, room);
       console.log(`Room created: ${roomId} by ${socket.id}`);
     } else {
-      if (room.participants.length > 20) {
+      if (room.participants.length >= 20 && !isRoomParticipant(room, socket.id)) {
          return cb({ success: false, error: 'Room is full' });
       }
-      room.participants.push(socket.id);
+
+      if (!isRoomParticipant(room, socket.id)) {
+        room.participants.push(socket.id);
+      }
+
       console.log(`User ${socket.id} joined room ${roomId}`);
     }
 
     cb({ 
       success: true, 
       isLeader: room.leaderId === socket.id,
-      state: room.state
+      state: room.state,
+      participants: room.participants,
     });
 
     io.to(roomId).emit('participants_updated', room.participants);
@@ -129,10 +158,12 @@ io.on('connection', (socket) => {
     
     const room = rooms.get(roomId);
     if (!room) return;
+    if (!isRoomParticipant(room, socket.id)) return;
+    if (room.leaderId !== socket.id) return;
 
-    // State type validation using Zod
+    // Drop malformed payloads before they can update shared room state.
     const result = SeekSchema.safeParse(update);
-    if (!result.success) return; // Ignore malicious/malformed data
+    if (!result.success) return;
 
     room.state.position = update.position;
     room.state.playing = update.playing;
@@ -144,7 +175,7 @@ io.on('connection', (socket) => {
   socket.on('force_sync_request', (roomId: string, cb) => {
     if (isRateLimited(socket.id)) return;
     const room = rooms.get(roomId);
-    if (room) {
+    if (room && isRoomParticipant(room, socket.id)) {
       cb({ state: room.state });
     }
   });
@@ -156,6 +187,7 @@ io.on('connection', (socket) => {
       if (room.participants.length === 0) {
         rooms.delete(roomId);
       } else if (room.leaderId === socket.id) {
+        // Transfer control to the next connected participant when the leader leaves.
         room.leaderId = room.participants[0] || "";
         io.to(roomId).emit('leader_changed', room.leaderId);
       }
@@ -167,20 +199,20 @@ io.on('connection', (socket) => {
 
 // Serve frontend in production
 if (process.env.NODE_ENV === 'production') {
-  // Since __dirname points to server/src when running tsx, we resolve to ../../client/dist
+  // `tsx` executes from `server/src`, so resolve the built frontend from the repo root.
   const clientBuildPath = path.resolve(__dirname, '../../client/dist');
   
-  // Set aggressive cache for static assets (1 year), since Vite uses hash bursting
+  // Vite fingerprints asset filenames, so they can be cached aggressively.
   app.use('/assets', express.static(path.resolve(clientBuildPath, 'assets'), {
     maxAge: '1y',
     immutable: true,
   }));
   
-  // Setup generic static serving for everything else (icon etc) with short cache
+  // HTML and unversioned public assets keep a shorter cache window.
   app.use(express.static(clientBuildPath, { maxAge: '1h' }));
 
   app.get(/.*/, (req, res) => {
-    // Avoid caching index.html so users always get the latest bundle references
+    // Always serve a fresh shell so clients receive the latest asset manifest.
     res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
     res.sendFile(path.resolve(clientBuildPath, 'index.html'));
   });

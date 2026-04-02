@@ -5,7 +5,10 @@
   "main": "index.js",
   "scripts": {
     "start": "tsx src/index.ts",
-    "dev": "nodemon --watch src --ext ts --exec tsx src/index.ts"
+    "dev": "nodemon --watch src --ext ts --exec tsx src/index.ts",
+    "build": "tsc --noEmit",
+    "lint": "tsc --noEmit",
+    "test": "vitest run"
   },
   "keywords": [],
   "author": "Nick Cardoso",

@@ -11,10 +11,14 @@ describe('Server Socket Logic Tests', () => {
   beforeAll(async () => {
     // Start listening on a random port for testing
     await new Promise<void>((resolve) => {
-      server.listen(() => {
-        const port = (server.address() as any).port;
-        clientSocket1 = Client(`http://localhost:${port}`);
-        clientSocket2 = Client(`http://localhost:${port}`);
+      server.listen(0, '127.0.0.1', () => {
+        const address = server.address();
+        if (!address || typeof address === 'string') {
+          throw new Error('Server did not provide a usable test address');
+        }
+
+        clientSocket1 = Client(`http://127.0.0.1:${address.port}`);
+        clientSocket2 = Client(`http://127.0.0.1:${address.port}`);
         
         let connectCount = 0;
         const checkDone = () => {
@@ -29,8 +33,8 @@ describe('Server Socket Logic Tests', () => {
   });
 
   afterAll(() => {
-    clientSocket1.disconnect();
-    clientSocket2.disconnect();
+    clientSocket1?.disconnect();
+    clientSocket2?.disconnect();
     server.close();
   });
 

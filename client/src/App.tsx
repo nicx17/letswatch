@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useEffect, useEffectEvent, useRef, useState } from 'react';
 import { io, Socket } from 'socket.io-client';
 import { SyncController } from './SyncController';
 import { RefreshCw, AlertTriangle, Users, Crown, WifiOff } from 'lucide-react';
@@ -14,6 +14,7 @@ interface SyncResponse {
   isLeader?: boolean;
   error?: string;
   state?: SyncState;
+  participants?: string[];
 }
 
 const V_URL = import.meta.env.VITE_SOCKET_URL;
@@ -21,7 +22,6 @@ const SOCKET_URL = V_URL ? V_URL : (import.meta.env.PROD ? window.location.origi
 const syncController = new SyncController();
 
 function App() {
-  const [socket, setSocket] = useState<Socket | null>(null);
   const [roomId, setRoomId] = useState('');
   const [isJoined, setIsJoined] = useState(false);
   const [isConnected, setIsConnected] = useState(false);
@@ -31,69 +31,38 @@ function App() {
   const [drift, setDrift] = useState(0);
   
   const videoRef = useRef<HTMLVideoElement>(null);
+  const socketRef = useRef<Socket | null>(null);
+  // Programmatic play/pause/seek updates would normally fire DOM events again.
   const ignoreEvents = useRef({ play: false, pause: false, seek: false });
-  
-  useEffect(() => {
-    const s = io(SOCKET_URL);
-    
-    setSocket(s);
-
-    s.on('connect', () => {
-      setIsConnected(true);
-    });
-
-    s.on('disconnect', () => {
-      setIsConnected(false);
-    });
-
-    return () => { s.disconnect(); };
-  }, []);
-
-  // Handle auto-reconnects and room state recovery
-  useEffect(() => {
-    if (!socket) return;
-    
-    const handleReconnect = () => {
-      if (roomId && isJoined) {
-        socket.emit('join_room', roomId, (response: SyncResponse) => {
-          if (response.success && response.isLeader !== undefined) {
-            setIsLeader(response.isLeader);
-          }
-        });
-      }
-    };
-
-    socket.on('connect', handleReconnect);
-    return () => {
-       socket.off('connect', handleReconnect);
-    };
-  }, [socket, roomId, isJoined]);
-
-  const handleJoin = () => {
-    if (!roomId || !socket) return;
-    socket.emit('join_room', roomId, (response: SyncResponse) => {
-      if (response.success && response.isLeader !== undefined) {
-        setIsJoined(true);
-        setIsLeader(response.isLeader);
-      } else {
-        alert(response.error || 'Failed to join room');
-      }
-    });
-  };
+  const objectUrlRef = useRef<string | null>(null);
 
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (file) {
+      if (objectUrlRef.current) {
+        URL.revokeObjectURL(objectUrlRef.current);
+      }
+
       const url = URL.createObjectURL(file);
+      objectUrlRef.current = url;
       setVideoSrc(url);
     }
   };
+
+  useEffect(() => {
+    return () => {
+      if (objectUrlRef.current) {
+        URL.revokeObjectURL(objectUrlRef.current);
+      }
+    };
+  }, []);
 
   const applyState = (state: SyncState) => {
     if (!videoRef.current) return;
     
     const targetTime = syncController.getTargetTime(state);
     
+    // Only seek when the drift is visible enough to matter to the viewer.
     if (Math.abs(videoRef.current.currentTime - targetTime) > 0.5) {
       ignoreEvents.current.seek = true;
       videoRef.current.currentTime = targetTime;
@@ -109,6 +78,8 @@ function App() {
   };
 
   const handleManualSync = () => {
+    const socket = socketRef.current;
+
     if (!socket || !videoRef.current) return;
     
     socket.emit('force_sync_request', roomId, (response: SyncResponse) => {
@@ -118,39 +89,90 @@ function App() {
     });
   };
 
+  const syncFromRoomResponse = (response: SyncResponse) => {
+    if (!response.success || response.isLeader === undefined) return false;
+
+    setIsLeader(response.isLeader);
+    setParticipantsCount(response.participants?.length ?? 0);
+
+    if (response.state) {
+      applyState(response.state);
+    }
+
+    return true;
+  };
+
+  const handleReconnect = useEffectEvent(() => {
+    const socket = socketRef.current;
+    if (!socket || !roomId || !isJoined) return;
+
+    socket.emit('join_room', roomId, (response: SyncResponse) => {
+      syncFromRoomResponse(response);
+    });
+  });
+
+  const handleStateUpdated = useEffectEvent((state: SyncState) => {
+    applyState(state);
+  });
+
+  const handleLeaderChanged = useEffectEvent((newLeaderId: string) => {
+    setIsLeader(socketRef.current?.id === newLeaderId);
+  });
+
+  const handleParticipantsUpdated = useEffectEvent((participantList: string[]) => {
+    setParticipantsCount(participantList.length);
+  });
+
   useEffect(() => {
-    if (!socket) return;
+    const socket = io(SOCKET_URL);
+    socketRef.current = socket;
 
-    const onStateUpdated = (state: SyncState) => {
-      // Defer to applyState to return early if videoRef is null
-      applyState(state);
+    const onConnect = () => {
+      setIsConnected(true);
+      handleReconnect();
     };
 
-    const onLeaderChanged = (newLeaderId: string) => {
-      setIsLeader(socket.id === newLeaderId);
+    const onDisconnect = () => {
+      setIsConnected(false);
     };
 
-    const onParticipantsUpdated = (participantList: string[]) => {
-      setParticipantsCount(participantList.length);
-    };
-
-    socket.on('state_updated', onStateUpdated);
-    socket.on('leader_changed', onLeaderChanged);
-    socket.on('participants_updated', onParticipantsUpdated);
+    socket.on('connect', onConnect);
+    socket.on('disconnect', onDisconnect);
+    socket.on('state_updated', handleStateUpdated);
+    socket.on('leader_changed', handleLeaderChanged);
+    socket.on('participants_updated', handleParticipantsUpdated);
 
     return () => {
-      socket.off('state_updated', onStateUpdated);
-      socket.off('leader_changed', onLeaderChanged);
-      socket.off('participants_updated', onParticipantsUpdated);
+      socket.off('connect', onConnect);
+      socket.off('disconnect', onDisconnect);
+      socket.off('state_updated', handleStateUpdated);
+      socket.off('leader_changed', handleLeaderChanged);
+      socket.off('participants_updated', handleParticipantsUpdated);
+      socket.disconnect();
+      socketRef.current = null;
     };
-  }, [socket, isJoined]);
+  }, []);
+
+  const handleJoin = () => {
+    const socket = socketRef.current;
+    if (!roomId || !socket) return;
+
+    socket.emit('join_room', roomId, (response: SyncResponse) => {
+      if (syncFromRoomResponse(response)) {
+        setIsJoined(true);
+      } else {
+        alert(response.error || 'Failed to join room');
+      }
+    });
+  };
 
   const handlePlay = () => {
+    const socket = socketRef.current;
     if (ignoreEvents.current.play) {
         ignoreEvents.current.play = false;
         return;
     }
-    if (socket && isJoined && videoRef.current) {
+    if (socket && isJoined && isLeader && videoRef.current) {
       socket.emit('sync_state', roomId, { 
         position: videoRef.current.currentTime, 
         playing: true 
@@ -159,11 +181,12 @@ function App() {
   };
 
   const handlePause = () => {
+    const socket = socketRef.current;
     if (ignoreEvents.current.pause) {
         ignoreEvents.current.pause = false;
         return;
     }
-    if (socket && isJoined && videoRef.current) {
+    if (socket && isJoined && isLeader && videoRef.current) {
       socket.emit('sync_state', roomId, { 
         position: videoRef.current.currentTime, 
         playing: false 
@@ -172,11 +195,12 @@ function App() {
   };
 
   const handleSeeked = () => {
+    const socket = socketRef.current;
     if (ignoreEvents.current.seek) {
         ignoreEvents.current.seek = false;
         return;
     }
-    if (socket && isJoined && videoRef.current) {
+    if (socket && isJoined && isLeader && videoRef.current) {
       socket.emit('sync_state', roomId, {
         position: videoRef.current.currentTime,
         playing: !videoRef.current.paused
@@ -185,9 +209,13 @@ function App() {
   };
 
   useEffect(() => {
-    if (!socket || !isJoined) return;
+    if (!isJoined) return;
     
     const interval = setInterval(() => {
+        const socket = socketRef.current;
+        if (!socket) return;
+
+        // Poll periodically to detect silent drift caused by buffering or tab throttling.
         socket.emit('force_sync_request', roomId, (resp: SyncResponse) => {
              if (videoRef.current && resp?.state && resp.state.playing) {
                  const currentDrift = syncController.calculateDrift(
@@ -195,15 +223,14 @@ function App() {
                  );
                  setDrift(currentDrift);
                  if (currentDrift > 2) {
-                     handleManualSync();
+                     applyState(resp.state);
                  }
              }
         });
     }, 3000);
 
     return () => clearInterval(interval);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [socket, isJoined, roomId]);
+  }, [isJoined, roomId]);
 
   const getDriftColor = () => {
     if (drift < 0.5) return 'text-green-500';
