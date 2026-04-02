@@ -316,6 +316,7 @@ function App() {
   const [memberProfiles, setMemberProfiles] = useState<MemberProfile[]>([]);
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
   const [chatDraft, setChatDraft] = useState('');
+  const [isEmojiStripCollapsed, setIsEmojiStripCollapsed] = useState(true);
   const [isChatCollapsed, setIsChatCollapsed] = useState(false);
   const [unreadMessages, setUnreadMessages] = useState(0);
   const [currentParticipantId, setCurrentParticipantId] = useState('');
@@ -809,6 +810,10 @@ function App() {
     setChatDraft((current) => `${current}${emoji}`);
   };
 
+  const handleEmojiStripToggle = () => {
+    setIsEmojiStripCollapsed((current) => !current);
+  };
+
   const handleCopyRoomLink = async () => {
     if (typeof window === 'undefined' || !roomId || !shareToken) return;
 
@@ -1190,9 +1195,6 @@ function App() {
                               <MessageSquare size={14} />
                               <span>Live chat</span>
                             </p>
-                            <h3 className="mt-3 text-2xl font-semibold tracking-tight text-[var(--text-main)]">
-                              Talk while you watch
-                            </h3>
                           </div>
                           <div className="metric-pill px-3 py-2">
                             <UserRound size={16} />
@@ -1238,25 +1240,27 @@ function App() {
                           ) : (
                             <div className="chat-empty-state">
                               <MessageSquare size={18} />
-                              <p>Say hi, react with emojis, or call out a favorite scene.</p>
+                              <p>No messages yet.</p>
                             </div>
                           )}
                         </div>
 
                         <div className="chat-compose">
-                          <div className="emoji-strip" aria-label="Quick emoji reactions">
-                            {TOP_CHAT_EMOJIS.map((emoji) => (
-                              <button
-                                key={emoji}
-                                type="button"
-                                className="emoji-chip"
-                                onClick={() => handleEmojiSelect(emoji)}
-                                aria-label={`Add ${emoji}`}
-                              >
-                                <EmojiText text={emoji} />
-                              </button>
-                            ))}
-                          </div>
+                          {!isEmojiStripCollapsed ? (
+                            <div className="emoji-strip" aria-label="Quick emoji reactions">
+                              {TOP_CHAT_EMOJIS.map((emoji) => (
+                                <button
+                                  key={emoji}
+                                  type="button"
+                                  className="emoji-chip"
+                                  onClick={() => handleEmojiSelect(emoji)}
+                                  aria-label={`Add ${emoji}`}
+                                >
+                                  <EmojiText text={emoji} />
+                                </button>
+                              ))}
+                            </div>
+                          ) : null}
 
                           <textarea
                             value={chatDraft}
@@ -1272,10 +1276,11 @@ function App() {
                             <div className="chat-compose-actions">
                               <button
                                 type="button"
-                                onClick={() => handleEmojiSelect(TOP_CHAT_EMOJIS[0])}
+                                onClick={handleEmojiStripToggle}
                                 className="chat-icon-button"
-                                aria-label="Add emoji"
-                                title="Add emoji"
+                                aria-label={isEmojiStripCollapsed ? 'Show emoji reactions' : 'Hide emoji reactions'}
+                                title={isEmojiStripCollapsed ? 'Show emoji reactions' : 'Hide emoji reactions'}
+                                aria-pressed={!isEmojiStripCollapsed}
                               >
                                 <SmilePlus size={16} />
                               </button>

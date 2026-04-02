@@ -769,13 +769,13 @@ body::after {
 .chat-panel {
     display: flex;
     flex-direction: column;
-    min-height: 32rem;
+    min-height: 35rem;
     height: 100%;
 }
 
 .chat-shell-theater .chat-panel {
-    max-height: calc(var(--viewport-height) - 5rem);
-    min-height: min(34rem, calc(var(--viewport-height) - 5rem));
+    max-height: calc(var(--viewport-height) - 4rem);
+    min-height: min(38rem, calc(var(--viewport-height) - 4rem));
 }
 
 .chat-panel-head {
@@ -793,12 +793,12 @@ body::after {
     margin-top: 1.2rem;
     padding-right: 0.4rem;
     overflow-y: auto;
-    min-height: 16rem;
-    max-height: 26rem;
+    min-height: 20rem;
+    max-height: 32rem;
 }
 
 .chat-shell-theater .chat-log {
-    max-height: calc(var(--viewport-height) - 18rem);
+    max-height: calc(var(--viewport-height) - 14.5rem);
 }
 
 .chat-log::-webkit-scrollbar {
