@@ -47,6 +47,7 @@ const getProductionOrigin = () => {
 
 const productionOrigin = getProductionOrigin();
 const corsOrigin = productionOrigin ? [productionOrigin] : '*';
+const productionHost = productionOrigin ? new URL(productionOrigin).host : null;
 
 app.use(cors({
   origin: corsOrigin,
@@ -65,7 +66,20 @@ const io = new Server(server, {
       return;
     }
 
-    callback(null, req.headers.origin === productionOrigin);
+    const requestOrigin = req.headers.origin;
+    if (requestOrigin) {
+      callback(null, requestOrigin === productionOrigin);
+      return;
+    }
+
+    // Same-origin polling requests may omit the Origin header. Fall back to the
+    // forwarded/public host so production deployments still connect cleanly.
+    const forwardedHostHeader = req.headers['x-forwarded-host'];
+    const requestHost = Array.isArray(forwardedHostHeader)
+      ? forwardedHostHeader[0]
+      : forwardedHostHeader || req.headers.host;
+
+    callback(null, requestHost === productionHost);
   },
 });
 
