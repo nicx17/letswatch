@@ -24,8 +24,9 @@ app.use(helmet({
     },
   }
 })); // Configured Security headers to support local video blobs
+
 const getAllowedOrigins = () => {
-  if (process.env.NODE_ENV !== 'production') return ['http://localhost:5173', 'http://127.0.0.1:5173'];
+  if (process.env.NODE_ENV !== 'production') return '*';
   const appUrl = process.env.APP_URL ? process.env.APP_URL.replace(/\/$/, '') : '*';
   return [appUrl, appUrl.replace('https://', 'http://')]; // Support HTTPS and HTTP
 };
