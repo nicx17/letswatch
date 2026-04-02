@@ -4,9 +4,25 @@ import { Server } from 'socket.io';
 import cors from 'cors';
 import helmet from 'helmet';
 import { z } from 'zod';
+import path from 'path';
+import { fileURLToPath } from 'url';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 const app = express();
-app.use(helmet()); // Security headers
+app.use(helmet({
+  contentSecurityPolicy: {
+    directives: {
+      defaultSrc: ["'self'"],
+      scriptSrc: ["'self'", "'unsafe-inline'"],
+      styleSrc: ["'self'", "'unsafe-inline'"],
+      imgSrc: ["'self'", "data:", "blob:", "https:"],
+      connectSrc: ["'self'", "ws:", "wss:"],
+      mediaSrc: ["'self'", "blob:"]
+    },
+  }
+})); // Configured Security headers to support local video blobs
 app.use(cors({
   origin: process.env.NODE_ENV === 'production' ? process.env.APP_URL : ['http://localhost:5173', 'http://127.0.0.1:5173'],
   methods: ['GET', 'POST']
@@ -139,6 +155,16 @@ io.on('connection', (socket) => {
     console.log('User disconnected:', socket.id);
   });
 });
+
+// Serve frontend in production
+if (process.env.NODE_ENV === 'production') {
+  const clientBuildPath = path.join(__dirname, '../../client/dist');
+  app.use(express.static(clientBuildPath));
+
+  app.get('*', (req, res) => {
+    res.sendFile(path.join(clientBuildPath, 'index.html'));
+  });
+}
 
 const PORT = process.env.PORT || 4000;
 if (process.env.NODE_ENV !== 'test') {
