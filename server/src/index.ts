@@ -20,7 +20,8 @@ app.use(helmet({
       styleSrc: ["'self'", "'unsafe-inline'"],
       imgSrc: ["'self'", "data:", "blob:", "https:"],
       connectSrc: ["'self'", "ws:", "wss:"],
-      mediaSrc: ["'self'", "blob:"]
+      mediaSrc: ["'self'", "blob:"],
+      upgradeInsecureRequests: null,
     },
   }
 })); // Configured Security headers to support local video blobs
