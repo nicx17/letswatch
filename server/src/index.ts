@@ -24,15 +24,21 @@ app.use(helmet({
     },
   }
 })); // Configured Security headers to support local video blobs
+const getAllowedOrigins = () => {
+  if (process.env.NODE_ENV !== 'production') return ['http://localhost:5173', 'http://127.0.0.1:5173'];
+  const appUrl = process.env.APP_URL ? process.env.APP_URL.replace(/\/$/, '') : '*';
+  return [appUrl, appUrl.replace('https://', 'http://')]; // Support HTTPS and HTTP
+};
+
 app.use(cors({
-  origin: process.env.NODE_ENV === 'production' ? process.env.APP_URL : ['http://localhost:5173', 'http://127.0.0.1:5173'],
+  origin: getAllowedOrigins(),
   methods: ['GET', 'POST']
 }));
 
 const server = createServer(app);
 const io = new Server(server, {
   cors: {
-    origin: process.env.NODE_ENV === 'production' ? process.env.APP_URL : ['http://localhost:5173', 'http://127.0.0.1:5173'],
+    origin: getAllowedOrigins(),
     methods: ['GET', 'POST'],
   },
 });

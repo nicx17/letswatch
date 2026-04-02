@@ -16,7 +16,8 @@ interface SyncResponse {
   state?: SyncState;
 }
 
-const SOCKET_URL = import.meta.env.VITE_SOCKET_URL || (import.meta.env.PROD ? window.location.origin : 'http://localhost:4000');
+const V_URL = import.meta.env.VITE_SOCKET_URL;
+const SOCKET_URL = V_URL ? V_URL : (import.meta.env.PROD ? window.location.origin : 'http://localhost:4000');
 const syncController = new SyncController();
 
 function App() {
