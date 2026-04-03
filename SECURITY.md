@@ -20,10 +20,10 @@ The Express server uses `helmet` and a custom CSP response-header middleware.
 Current behavior includes:
 
 - nonce-based `script-src` with `strict-dynamic` support for stronger XSS resistance (without `unsafe-inline` in scripts)
-- Trusted Types policy-name restrictions in CSP (`trusted-types default`)
+- Trusted Types restrictions in CSP (`trusted-types default` and `require-trusted-types-for 'script'`)
 - HSTS in production with long max-age, subdomains, and preload
 
-Strict Trusted Types sink enforcement currently runs in `Content-Security-Policy-Report-Only` mode (`require-trusted-types-for 'script'`) with reports sent to `/csp-violation-report` for telemetry. This preserves runtime compatibility while collecting hard data needed before full enforcement.
+To keep enforced Trusted Types compatible with runtime script paths, production HTML responses inject an early default Trusted Types policy bootstrap before app scripts execute.
 
 The CSP still allows:
 

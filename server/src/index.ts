@@ -135,6 +135,7 @@ app.use((_req, res, next) => {
     "base-uri 'self'",
     "frame-ancestors 'none'",
     "trusted-types default",
+    "require-trusted-types-for 'script'",
   ];
 
   if (isProduction) {
@@ -142,12 +143,6 @@ app.use((_req, res, next) => {
   }
 
   res.setHeader('Content-Security-Policy', directives.join('; '));
-  const reportOnlyDirectives = [
-    "trusted-types default",
-    "require-trusted-types-for 'script'",
-    'report-uri /csp-violation-report',
-  ];
-  res.setHeader('Content-Security-Policy-Report-Only', reportOnlyDirectives.join('; '));
   next();
 });
 
@@ -960,6 +955,10 @@ if (process.env.NODE_ENV === 'production') {
   const indexHtmlPath = path.resolve(clientBuildPath, 'index.html');
   const addNonceToScripts = (html: string, nonce: string) =>
     html.replaceAll(/<script(\s|>)/g, `<script nonce="${nonce}"$1`);
+  const injectTrustedTypesDefaultPolicy = (html: string, nonce: string) => {
+    const bootstrapScript = `<script nonce="${nonce}">(()=>{try{const tt=globalThis.trustedTypes;if(!tt||typeof tt.createPolicy!=='function')return;tt.createPolicy('default',{createHTML:(input)=>input,createScript:(input)=>input,createScriptURL:(input)=>input});}catch{}})();</script>`;
+    return html.replace('<head>', `<head>${bootstrapScript}`);
+  };
 
   app.get('/index.html', (_req, res) => {
     res.redirect(302, '/');
@@ -983,7 +982,8 @@ if (process.env.NODE_ENV === 'production') {
     try {
       const html = await readFile(indexHtmlPath, 'utf8');
       const nonce = String(res.locals.cspNonce ?? '');
-      res.send(addNonceToScripts(html, nonce));
+      const htmlWithNonce = addNonceToScripts(html, nonce);
+      res.send(injectTrustedTypesDefaultPolicy(htmlWithNonce, nonce));
     } catch (error) {
       next(error);
     }

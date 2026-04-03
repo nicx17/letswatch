@@ -534,13 +534,14 @@ body::after {
 
     .player-stage .chat-shell:not(.chat-shell-theater):not(.chat-shell-collapsed) .chat-panel {
         flex: 1;
-        height: auto;
-        max-height: none;
-        min-height: 0;
+        min-height: 35rem;
+        height: 35rem;
+        max-height: 35rem;
+        overflow: hidden;
     }
 
     .player-stage .chat-shell:not(.chat-shell-theater):not(.chat-shell-collapsed) .chat-log {
-        max-height: none;
+        max-height: 32rem;
     }
 
     .player-stage-theater {
