@@ -135,7 +135,6 @@ app.use((_req, res, next) => {
     "base-uri 'self'",
     "frame-ancestors 'none'",
     "trusted-types default",
-    "require-trusted-types-for 'script'",
   ];
 
   if (isProduction) {
@@ -143,8 +142,72 @@ app.use((_req, res, next) => {
   }
 
   res.setHeader('Content-Security-Policy', directives.join('; '));
+  const reportOnlyDirectives = [
+    "trusted-types default",
+    "require-trusted-types-for 'script'",
+    'report-uri /csp-violation-report',
+  ];
+  res.setHeader('Content-Security-Policy-Report-Only', reportOnlyDirectives.join('; '));
   next();
 });
+
+type CspViolationReport = {
+  'document-uri'?: string;
+  disposition?: string;
+  'effective-directive'?: string;
+  'violated-directive'?: string;
+  'blocked-uri'?: string;
+  'source-file'?: string;
+  'line-number'?: number;
+  'column-number'?: number;
+};
+
+const extractCspViolationReport = (body: unknown): CspViolationReport | null => {
+  if (!body || typeof body !== 'object') {
+    return null;
+  }
+
+  const asRecord = body as Record<string, unknown>;
+
+  if ('csp-report' in asRecord && typeof asRecord['csp-report'] === 'object') {
+    return asRecord['csp-report'] as CspViolationReport;
+  }
+
+  if (Array.isArray(body) && body.length > 0) {
+    const first = body[0];
+    if (first && typeof first === 'object') {
+      const firstRecord = first as Record<string, unknown>;
+      if ('body' in firstRecord && typeof firstRecord.body === 'object') {
+        return firstRecord.body as CspViolationReport;
+      }
+    }
+  }
+
+  return null;
+};
+
+app.post(
+  '/csp-violation-report',
+  express.json({ type: ['application/csp-report', 'application/reports+json', 'application/json'] }),
+  (req, res) => {
+    const report = extractCspViolationReport(req.body);
+    if (report) {
+      writeLog('warn', 'csp.report_only_violation', {
+        disposition: report.disposition,
+        effectiveDirective: report['effective-directive'],
+        violatedDirective: report['violated-directive'],
+        blockedUri: report['blocked-uri'],
+        sourceFile: report['source-file'],
+        lineNumber: report['line-number'],
+        columnNumber: report['column-number'],
+        documentUri: report['document-uri'],
+        userAgent: req.headers['user-agent'],
+      });
+    }
+
+    res.status(204).end();
+  },
+);
 
 const getProductionOrigin = () => {
   if (!isProduction) return null;

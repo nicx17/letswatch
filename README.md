@@ -110,7 +110,7 @@ What these commands do:
 ## Security Headers Summary
 
 - CSP is emitted as an HTTP response header and uses nonce-augmented `script-src` with strict-dynamic support (without `unsafe-inline` for scripts).
-- Trusted Types directives are enabled server-side, and the client bootstraps a defensive default policy that rejects untrusted sink content.
+- Trusted Types policy names are constrained server-side, and sink enforcement is shipped in report-only mode to capture violations safely before strict enforcement.
 - HSTS is enabled in production with long max-age, subdomain coverage, and preload.
 
 See [`DEPLOYMENT.md`](DEPLOYMENT.md) for a full deployment walkthrough.
