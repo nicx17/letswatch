@@ -1,30 +1,92 @@
 import 'dotenv/config';
 import express from 'express';
-import { createServer } from 'http';
+import { createServer } from 'node:http';
 import { Server } from 'socket.io';
 import cors from 'cors';
 import helmet from 'helmet';
 import compression from 'compression';
 import { z } from 'zod';
-import path from 'path';
-import { fileURLToPath } from 'url';
-import { createHash, randomBytes, timingSafeEqual } from 'crypto';
+import { readFile } from 'node:fs/promises';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { createHash, randomBytes, scryptSync, timingSafeEqual } from 'node:crypto';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const app = express();
 const LOG_NAMESPACE = 'server';
+const isProduction = process.env.NODE_ENV === 'production';
 
 type LogLevel = 'info' | 'warn' | 'error';
 
+const SENSITIVE_LOG_KEYS = new Set([
+  'socketid',
+  'participantid',
+  'selfparticipantid',
+  'roomid',
+  'roomcode',
+  'pin',
+  'pinsalt',
+  'token',
+  'sharetoken',
+  'sharetokenhash',
+  'pinhash',
+  'displayname',
+  'origin',
+  'host',
+]);
+
+const isSensitiveLogKey = (key: string) => {
+  const normalized = key.toLowerCase();
+  if (SENSITIVE_LOG_KEYS.has(normalized)) {
+    return true;
+  }
+
+  return /(token|pin|socket|participant|display.?name|origin|host|roomid|roomcode|hash)/i.test(key);
+};
+
+const obfuscateLogString = (value: string) => {
+  const digest = createHash('sha256').update(value).digest('hex').slice(0, 10);
+  return `redacted:${digest}`;
+};
+
+const sanitizeLogValue = (value: unknown, key?: string): unknown => {
+  if (typeof value === 'string') {
+    if (key && isSensitiveLogKey(key)) {
+      return obfuscateLogString(value);
+    }
+
+    return value;
+  }
+
+  if (typeof value === 'number' || typeof value === 'boolean' || value === null || value === undefined) {
+    return value;
+  }
+
+  if (Array.isArray(value)) {
+    return value.map((entry) => sanitizeLogValue(entry, key));
+  }
+
+  if (typeof value === 'object') {
+    const sanitizedEntries = Object.entries(value as Record<string, unknown>).map(([entryKey, entryValue]) => [
+      entryKey,
+      sanitizeLogValue(entryValue, entryKey),
+    ]);
+    return Object.fromEntries(sanitizedEntries);
+  }
+
+  return `[unsupported:${typeof value}]`;
+};
+
 const writeLog = (level: LogLevel, event: string, meta?: Record<string, unknown>) => {
+  const sanitizedMeta = meta ? sanitizeLogValue(meta) as Record<string, unknown> : undefined;
   const entry = {
     ts: new Date().toISOString(),
     ns: LOG_NAMESPACE,
     level,
     event,
-    ...(meta ? { meta } : {}),
+    ...(sanitizedMeta ? { meta: sanitizedMeta } : {}),
   };
 
   const output = JSON.stringify(entry);
@@ -44,22 +106,45 @@ const writeLog = (level: LogLevel, event: string, meta?: Record<string, unknown>
 // Compress static assets and JSON responses before they leave the server.
 app.use(compression());
 
+app.use((_req, res, next) => {
+  res.locals.cspNonce = randomBytes(16).toString('base64');
+  next();
+});
+
 app.use(helmet({
-  contentSecurityPolicy: {
-    directives: {
-      defaultSrc: ["'self'"],
-      scriptSrc: ["'self'", "https://static.cloudflareinsights.com"],
-      styleSrc: ["'self'", "'unsafe-inline'"],
-      imgSrc: ["'self'", "data:", "blob:", "https:"],
-      connectSrc: ["'self'", "ws:", "wss:", "https://cloudflareinsights.com"],
-      mediaSrc: ["'self'", "blob:"],
-      requireTrustedTypesFor: ["'script'"],
-      upgradeInsecureRequests: null,
-    },
-  }
+  hsts: isProduction
+    ? {
+        maxAge: 63072000,
+        includeSubDomains: true,
+        preload: true,
+      }
+    : false,
+  contentSecurityPolicy: false,
 }));
 
-const isProduction = process.env.NODE_ENV === 'production';
+app.use((_req, res, next) => {
+  const nonce = String(res.locals.cspNonce ?? '');
+  const directives = [
+    "default-src 'self'",
+    `script-src 'self' 'strict-dynamic' 'nonce-${nonce}' https://static.cloudflareinsights.com 'sha256-xEpMjc29DxPGet3wD8QBTFXJ4vGx60/Y07K8AohTM/M=' 'sha256-7/wUdeTePWyHkMlev6uiodRq0R9yxOUkCYi4Vu7T7nw='`,
+    "style-src 'self' 'unsafe-inline'",
+    "img-src 'self' data: blob: https:",
+    "connect-src 'self' ws: wss: https://cloudflareinsights.com https://static.cloudflareinsights.com",
+    "media-src 'self' blob:",
+    "object-src 'none'",
+    "base-uri 'self'",
+    "frame-ancestors 'none'",
+    "trusted-types default",
+    "require-trusted-types-for 'script'",
+  ];
+
+  if (isProduction) {
+    directives.push('upgrade-insecure-requests');
+  }
+
+  res.setHeader('Content-Security-Policy', directives.join('; '));
+  next();
+});
 
 const getProductionOrigin = () => {
   if (!isProduction) return null;
@@ -172,6 +257,7 @@ const consumeRateLimit = (key: string, limit: number, windowMs: number) => {
   return record.count > limit;
 };
 export const isRateLimited = (socketId: string) => consumeRateLimit(socketId, 15, 2000);
+const isAuthRateLimited = (socketId: string) => consumeRateLimit(`${socketId}:auth`, 8, 10_000);
 const isImageRateLimited = (socketId: string) => consumeRateLimit(`${socketId}:image`, 3, 30000);
 
 export const SeekSchema = z.object({
@@ -236,16 +322,49 @@ const buildDisplayName = (requestedName: string | undefined, socketId: string) =
   return `Viewer ${socketId.slice(0, 4)}`;
 };
 
-const createPinHash = (pin: string, salt: string) =>
+const PIN_HASH_VERSION = 'scrypt:v1';
+const PIN_SCRYPT_COST = 1 << 14;
+const PIN_SCRYPT_BLOCK_SIZE = 8;
+const PIN_SCRYPT_PARALLELIZATION = 1;
+const PIN_SCRYPT_KEY_LENGTH = 64;
+
+const createLegacyPinHash = (pin: string, salt: string) =>
   createHash('sha256').update(`${salt}:${pin}`).digest('hex');
+
+const createPinHash = (pin: string, salt: string) => {
+  const hash = scryptSync(pin, salt, PIN_SCRYPT_KEY_LENGTH, {
+    N: PIN_SCRYPT_COST,
+    r: PIN_SCRYPT_BLOCK_SIZE,
+    p: PIN_SCRYPT_PARALLELIZATION,
+  }).toString('hex');
+
+  return `${PIN_HASH_VERSION}$${hash}`;
+};
+
+const splitVersionedPinHash = (pinHash: string) => {
+  const [version, hash] = pinHash.split('$', 2);
+  if (!version || !hash) {
+    return null;
+  }
+
+  return { version, hash };
+};
 
 const hashShareToken = (shareToken: string) =>
   createHash('sha256').update(`share:${shareToken}`).digest('hex');
 
 const verifyPin = (room: SyncSession, pin: string) => {
-  const expectedHash = Buffer.from(room.pinHash, 'hex');
-  const providedHash = Buffer.from(createPinHash(pin, room.pinSalt), 'hex');
-  return expectedHash.length === providedHash.length && timingSafeEqual(expectedHash, providedHash);
+  const versionedHash = splitVersionedPinHash(room.pinHash);
+  if (versionedHash?.version === PIN_HASH_VERSION) {
+    const expectedHash = Buffer.from(versionedHash.hash, 'hex');
+    const providedHash = Buffer.from(createPinHash(pin, room.pinSalt).split('$', 2)[1] ?? '', 'hex');
+    return expectedHash.length === providedHash.length && timingSafeEqual(expectedHash, providedHash);
+  }
+
+  // Backward compatibility for rooms created before scrypt migration.
+  const expectedLegacyHash = Buffer.from(room.pinHash, 'hex');
+  const providedLegacyHash = Buffer.from(createLegacyPinHash(pin, room.pinSalt), 'hex');
+  return expectedLegacyHash.length === providedLegacyHash.length && timingSafeEqual(expectedLegacyHash, providedLegacyHash);
 };
 
 const verifyShareToken = (room: SyncSession, shareToken: string) => {
@@ -314,6 +433,10 @@ export const createRoomForSocket = (
   memberProfiles: Array<{ participantId: string; displayName: string }>;
   selfParticipantId: string;
 }> => {
+  if (isAuthRateLimited(socketId)) {
+    return { success: false, error: 'Too many authentication attempts. Please wait a moment and try again.' };
+  }
+
   const parsedPayload = CreateRoomSchema.safeParse(payload ?? {});
   if (!parsedPayload.success) {
     return { success: false, error: 'Invalid room code, PIN, or display name' };
@@ -371,6 +494,10 @@ export const joinRoomForSocket = (
   memberProfiles: Array<{ participantId: string; displayName: string }>;
   selfParticipantId?: string;
 }> => {
+  if (isAuthRateLimited(socketId)) {
+    return { success: false, error: 'Too many authentication attempts. Please wait a moment and try again.' };
+  }
+
   const parsedPayload = JoinRoomSchema.safeParse(payload);
   if (!parsedPayload.success) {
     return { success: false, error: 'Invalid room credentials' };
@@ -414,6 +541,10 @@ export const joinRoomByLinkForSocket = (
   memberProfiles: Array<{ participantId: string; displayName: string }>;
   selfParticipantId?: string;
 }> => {
+  if (isAuthRateLimited(socketId)) {
+    return { success: false, error: 'Too many authentication attempts. Please wait a moment and try again.' };
+  }
+
   const parsedPayload = LinkJoinRoomSchema.safeParse(payload);
   if (!parsedPayload.success) {
     return { success: false, error: 'Invalid room link' };
@@ -763,6 +894,13 @@ io.on('connection', (socket) => {
 if (process.env.NODE_ENV === 'production') {
   // `tsx` executes from `server/src`, so resolve the built frontend from the repo root.
   const clientBuildPath = path.resolve(__dirname, '../../client/dist');
+  const indexHtmlPath = path.resolve(clientBuildPath, 'index.html');
+  const addNonceToScripts = (html: string, nonce: string) =>
+    html.replaceAll(/<script(\s|>)/g, `<script nonce="${nonce}"$1`);
+
+  app.get('/index.html', (_req, res) => {
+    res.redirect(302, '/');
+  });
   
   // Vite fingerprints asset filenames, so they can be cached aggressively.
   app.use('/assets', express.static(path.resolve(clientBuildPath, 'assets'), {
@@ -771,16 +909,25 @@ if (process.env.NODE_ENV === 'production') {
   }));
   
   // HTML and unversioned public assets keep a shorter cache window.
-  app.use(express.static(clientBuildPath, { maxAge: '1h' }));
+  app.use(express.static(clientBuildPath, {
+    maxAge: '1h',
+    index: false,
+  }));
 
-  app.get(/.*/, (req, res) => {
+  app.get(/.*/, async (req, res, next) => {
     // Always serve a fresh shell so clients receive the latest asset manifest.
     res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
-    res.sendFile(path.resolve(clientBuildPath, 'index.html'));
+    try {
+      const html = await readFile(indexHtmlPath, 'utf8');
+      const nonce = String(res.locals.cspNonce ?? '');
+      res.send(addNonceToScripts(html, nonce));
+    } catch (error) {
+      next(error);
+    }
   });
 }
 
-const PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : 4000;
+const PORT = process.env.PORT ? Number.parseInt(process.env.PORT, 10) : 4000;
 if (process.env.NODE_ENV !== 'test') {
   server.listen(PORT, '0.0.0.0', () => {
     writeLog('info', 'server.started', {

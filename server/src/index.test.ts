@@ -189,4 +189,32 @@ describe('Server Room Logic', () => {
     if (duplicate.success) return;
     expect(duplicate.error).toContain('already in use');
   });
+
+  it('throttles repeated authentication attempts on room joins', () => {
+    const created = createRoomForSocket('socket-1', {
+      roomId: 'AUTHRAT1',
+      pin: '123456',
+      displayName: 'Host',
+    });
+    expect(created.success).toBe(true);
+    if (!created.success) return;
+
+    let lastAttempt = joinRoomForSocket('socket-auth', {
+      roomId: created.roomId,
+      pin: '000000',
+      displayName: 'Guest',
+    });
+
+    for (let attempt = 0; attempt < 10; attempt += 1) {
+      lastAttempt = joinRoomForSocket('socket-auth', {
+        roomId: created.roomId,
+        pin: '000000',
+        displayName: 'Guest',
+      });
+    }
+
+    expect(lastAttempt.success).toBe(false);
+    if (lastAttempt.success) return;
+    expect(lastAttempt.error).toContain('Too many authentication attempts');
+  });
 });

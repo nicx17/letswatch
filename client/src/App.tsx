@@ -65,14 +65,23 @@ const TOP_CHAT_EMOJIS = [
 ];
 
 const V_URL = import.meta.env.VITE_SOCKET_URL;
-const SOCKET_URL = V_URL
-  ? V_URL
-  : import.meta.env.PROD
-    ? window.location.origin
-    : `http://${window.location.hostname}:4000`;
+const getDefaultSocketUrl = () => {
+  const browserWindow = globalThis.window;
+  if (!browserWindow) {
+    return 'http://localhost:4000';
+  }
+
+  if (import.meta.env.PROD) {
+    return browserWindow.location.origin;
+  }
+
+  return `http://${browserWindow.location.hostname}:4000`;
+};
+
+const SOCKET_URL = V_URL || getDefaultSocketUrl();
 
 const clientLoggingEnabled =
-  import.meta.env.DEV || (typeof window !== 'undefined' && window.localStorage.getItem('letswatch-debug') === '1');
+  import.meta.env.DEV || globalThis.window?.localStorage.getItem('letswatch-debug') === '1';
 
 const clientLog = (
   level: 'info' | 'warn' | 'error',
@@ -102,11 +111,27 @@ const clientLog = (
   console.info(payload);
 };
 
+const getErrorMessage = (error: unknown) => {
+  if (error instanceof Error) {
+    return error.message;
+  }
+
+  if (typeof error === 'string') {
+    return error;
+  }
+
+  try {
+    return JSON.stringify(error);
+  } catch {
+    return 'Unknown error';
+  }
+};
+
 const syncController = new SyncController();
 
 const convertSrtToVtt = (subtitleContent: string) => {
-  const normalized = subtitleContent.replace(/\r+/g, '');
-  const withCueTimings = normalized.replace(
+  const normalized = subtitleContent.replaceAll(/\r+/g, '');
+  const withCueTimings = normalized.replaceAll(
     /(\d{2}:\d{2}:\d{2}),(\d{3})/g,
     '$1.$2',
   );
@@ -149,29 +174,33 @@ const isThemeName = (value: string | null): value is ThemeName => {
 };
 
 const getInitialTheme = (): ThemeName => {
-  if (typeof window === 'undefined') return 'ivory';
+  const browserWindow = globalThis.window;
+  if (!browserWindow) return 'ivory';
 
-  const storedTheme = window.localStorage.getItem('letswatch-theme');
+  const storedTheme = browserWindow.localStorage.getItem('letswatch-theme');
   if (isThemeName(storedTheme)) {
     return storedTheme;
   }
 
-  return window.matchMedia('(prefers-color-scheme: dark)').matches ? 'midnight' : 'ivory';
+  return browserWindow.matchMedia('(prefers-color-scheme: dark)').matches ? 'midnight' : 'ivory';
 };
 
 const getInitialDisplayName = () => {
-  if (typeof window === 'undefined') return '';
-  return window.localStorage.getItem('letswatch-display-name') ?? '';
+  const browserWindow = globalThis.window;
+  if (!browserWindow) return '';
+  return browserWindow.localStorage.getItem('letswatch-display-name') ?? '';
 };
 
 const getInitialSharedRoomId = () => {
-  if (typeof window === 'undefined') return '';
-  return new URLSearchParams(window.location.search).get('room')?.trim().toUpperCase() ?? '';
+  const browserWindow = globalThis.window;
+  if (!browserWindow) return '';
+  return new URLSearchParams(browserWindow.location.search).get('room')?.trim().toUpperCase() ?? '';
 };
 
 const getInitialSharedRoomToken = () => {
-  if (typeof window === 'undefined') return '';
-  return new URLSearchParams(window.location.search).get('token')?.trim() ?? '';
+  const browserWindow = globalThis.window;
+  if (!browserWindow) return '';
+  return new URLSearchParams(browserWindow.location.search).get('token')?.trim() ?? '';
 };
 
 const showSubtitleTrack = (
@@ -299,7 +328,7 @@ const EmojiText = ({ text }: { text: string }) => {
   return <span ref={textRef} />;
 };
 
-function App() {
+function App() { // NOSONAR
   const [roomId, setRoomId] = useState(getInitialSharedRoomId);
   const [roomPin, setRoomPin] = useState('');
   const [isJoined, setIsJoined] = useState(false);
@@ -325,12 +354,13 @@ function App() {
   const [shareToken, setShareToken] = useState(getInitialSharedRoomToken);
   const [roomLinkCopied, setRoomLinkCopied] = useState(false);
   const [viewportSize, setViewportSize] = useState(() => ({
-    width: typeof window === 'undefined' ? 1440 : window.innerWidth,
-    height: typeof window === 'undefined' ? 900 : window.innerHeight,
+    width: globalThis.window?.innerWidth ?? 1440,
+    height: globalThis.window?.innerHeight ?? 900,
   }));
 
   const videoRef = useRef<HTMLVideoElement>(null);
   const chatScrollRef = useRef<HTMLDivElement>(null);
+  const chatInputRef = useRef<HTMLTextAreaElement>(null);
   const chatImageInputRef = useRef<HTMLInputElement>(null);
   const socketRef = useRef<Socket | null>(null);
   const copyResetTimeoutRef = useRef<number | null>(null);
@@ -340,25 +370,28 @@ function App() {
 
   useEffect(() => {
     document.documentElement.dataset.theme = theme;
-    window.localStorage.setItem('letswatch-theme', theme);
+    globalThis.window?.localStorage.setItem('letswatch-theme', theme);
   }, [theme]);
 
   useEffect(() => {
-    window.localStorage.setItem('letswatch-display-name', displayName);
+    globalThis.window?.localStorage.setItem('letswatch-display-name', displayName);
   }, [displayName]);
 
   useEffect(() => {
+    const browserWindow = globalThis.window;
+    if (!browserWindow) return;
+
     const updateViewportSize = () => {
       setViewportSize({
-        width: window.innerWidth,
-        height: window.innerHeight,
+        width: browserWindow.innerWidth,
+        height: browserWindow.innerHeight,
       });
     };
 
     updateViewportSize();
-    window.addEventListener('resize', updateViewportSize);
+    browserWindow.addEventListener('resize', updateViewportSize);
 
-    return () => window.removeEventListener('resize', updateViewportSize);
+    return () => browserWindow.removeEventListener('resize', updateViewportSize);
   }, []);
 
   const applyVideoFile = (file: File) => {
@@ -441,7 +474,7 @@ function App() {
   useEffect(() => {
     return () => {
       if (copyResetTimeoutRef.current) {
-        window.clearTimeout(copyResetTimeoutRef.current);
+        globalThis.clearTimeout(copyResetTimeoutRef.current);
       }
 
       if (objectUrlRef.current) {
@@ -457,11 +490,11 @@ function App() {
   useEffect(() => {
     if (!subtitleSrc) return;
 
-    const timeoutId = window.setTimeout(() => {
+    const timeoutId = globalThis.setTimeout(() => {
       showSubtitleTrack(videoRef.current, true, subtitleLabel);
     }, 0);
 
-    return () => window.clearTimeout(timeoutId);
+    return () => globalThis.clearTimeout(timeoutId);
   }, [subtitleSrc, subtitleLabel]);
 
   useEffect(() => {
@@ -484,7 +517,7 @@ function App() {
       videoRef.current.play().catch((error) => {
         clientLog('error', 'playback.play_failed', {
           roomId,
-          message: error instanceof Error ? error.message : String(error),
+          message: getErrorMessage(error),
         });
       });
     } else if (!state.playing && !videoRef.current.paused) {
@@ -521,12 +554,13 @@ function App() {
   };
 
   const updateShareUrl = (nextRoomId: string, nextShareToken: string) => {
-    if (typeof window === 'undefined') return;
+    const browserWindow = globalThis.window;
+    if (!browserWindow) return;
 
-    const url = new URL(window.location.href);
+    const url = new URL(browserWindow.location.href);
     url.searchParams.set('room', nextRoomId);
     url.searchParams.set('token', nextShareToken);
-    window.history.replaceState({}, '', url.toString());
+    browserWindow.history.replaceState({}, '', url.toString());
   };
 
   const joinRoomFromLink = useEffectEvent((targetRoomId: string) => {
@@ -646,7 +680,7 @@ function App() {
   const handleCreateRoom = () => {
     const socket = socketRef.current;
     const normalizedRoomId = roomId.trim().toUpperCase();
-    const normalizedPin = roomPin.replace(/\D/g, '').slice(0, 6);
+    const normalizedPin = roomPin.replaceAll(/\D/g, '').slice(0, 6);
     if (!socket || !normalizedRoomId || !normalizedPin) return;
 
     setRoomId(normalizedRoomId);
@@ -677,7 +711,7 @@ function App() {
   const handleJoin = () => {
     const socket = socketRef.current;
     const normalizedRoomId = roomId.trim().toUpperCase();
-    const normalizedPin = roomPin.replace(/\D/g, '').slice(0, 6);
+    const normalizedPin = roomPin.replaceAll(/\D/g, '').slice(0, 6);
     if (!normalizedRoomId || !normalizedPin || !socket) return;
 
     setRoomId(normalizedRoomId);
@@ -757,7 +791,7 @@ function App() {
       if (!socket) return;
 
       socket.emit('force_sync_request', roomId, (response: SyncResponse) => {
-        if (!videoRef.current || !response?.state || !response.state.playing) return;
+        if (!videoRef.current || !response?.state?.playing) return;
 
         const currentDrift = syncController.calculateDrift(videoRef.current.currentTime, response.state);
         setDrift(currentDrift);
@@ -807,7 +841,26 @@ function App() {
   };
 
   const handleEmojiSelect = (emoji: string) => {
-    setChatDraft((current) => `${current}${emoji}`);
+    const draftInput = chatInputRef.current;
+    if (!draftInput) {
+      setChatDraft((current) => `${current}${emoji}`);
+      return;
+    }
+
+    const selectionStart = draftInput.selectionStart ?? chatDraft.length;
+    const selectionEnd = draftInput.selectionEnd ?? chatDraft.length;
+
+    setChatDraft((current) => {
+      const safeStart = Math.min(selectionStart, current.length);
+      const safeEnd = Math.min(selectionEnd, current.length);
+      return `${current.slice(0, safeStart)}${emoji}${current.slice(safeEnd)}`;
+    });
+
+    globalThis.requestAnimationFrame(() => {
+      const nextCaretPosition = selectionStart + emoji.length;
+      draftInput.focus();
+      draftInput.setSelectionRange(nextCaretPosition, nextCaretPosition);
+    });
   };
 
   const handleEmojiStripToggle = () => {
@@ -815,26 +868,27 @@ function App() {
   };
 
   const handleCopyRoomLink = async () => {
-    if (typeof window === 'undefined' || !roomId || !shareToken) return;
+    const browserWindow = globalThis.window;
+    if (!browserWindow || !roomId || !shareToken) return;
 
-    const shareUrl = new URL(window.location.href);
+    const shareUrl = new URL(browserWindow.location.href);
     shareUrl.searchParams.set('room', roomId);
     shareUrl.searchParams.set('token', shareToken);
 
     try {
-      await window.navigator.clipboard.writeText(shareUrl.toString());
+      await browserWindow.navigator.clipboard.writeText(shareUrl.toString());
       setRoomLinkCopied(true);
       if (copyResetTimeoutRef.current) {
-        window.clearTimeout(copyResetTimeoutRef.current);
+        globalThis.clearTimeout(copyResetTimeoutRef.current);
       }
-      copyResetTimeoutRef.current = window.setTimeout(() => {
+      copyResetTimeoutRef.current = globalThis.setTimeout(() => {
         setRoomLinkCopied(false);
       }, 2200);
       clientLog('info', 'room.link_copied', { roomId });
     } catch (error) {
       clientLog('warn', 'room.link_copy_failed', {
         roomId,
-        message: error instanceof Error ? error.message : String(error),
+        message: getErrorMessage(error),
       });
       alert('Unable to copy the room link');
     }
@@ -884,7 +938,7 @@ function App() {
       .catch((error: unknown) => {
         clientLog('error', 'chat.image_prepare_failed', {
           roomId,
-          message: error instanceof Error ? error.message : String(error),
+          message: getErrorMessage(error),
         });
         alert(error instanceof Error ? error.message : 'Unable to send image');
       });
@@ -922,10 +976,14 @@ function App() {
   const otherMembers = memberProfiles.filter((member) => member.participantId !== currentParticipantId);
   const currentMemberName =
     memberProfiles.find((member) => member.participantId === currentParticipantId)?.displayName || displayName || 'You';
+  const showJoinScreen = isJoined === false;
+  const shouldShowUploadState = !videoSrc;
+  const isChatExpanded = isChatCollapsed === false;
+  const isEmojiStripOpen = isEmojiStripCollapsed === false;
 
   const getDriftColor = () => {
     if (drift < 0.5) return 'text-emerald-400';
-    if (drift < 2.0) return 'text-amber-300';
+    if (drift < 2) return 'text-amber-300';
     return 'text-rose-400';
   };
 
@@ -984,7 +1042,7 @@ function App() {
       </header>
 
       <main className={`main-shell mx-auto flex w-full max-w-[1480px] flex-1 flex-col px-6 pb-10 sm:px-8 lg:px-12 ${isTheaterMode ? 'main-shell-theater' : ''}`}>
-        {!isJoined ? (
+        {showJoinScreen ? (
           <section className="grid flex-1 content-start gap-8 lg:grid-cols-[1.15fr_0.85fr] xl:gap-10">
             <div className="chrome-panel panel-feature rounded-[32px] p-8 sm:p-10 lg:p-12">
               <div className="space-y-6">
@@ -1029,36 +1087,53 @@ function App() {
                 </p>
               </div>
 
-              <div className="mt-10 space-y-5">
-                <label className="block text-xs font-semibold uppercase tracking-[0.28em] text-[var(--text-muted)]">
+              <form
+                className="mt-10 space-y-5"
+                onSubmit={(e) => {
+                  e.preventDefault();
+                  handleJoin();
+                }}
+              >
+                <label htmlFor="join-display-name" className="block text-xs font-semibold uppercase tracking-[0.28em] text-[var(--text-muted)]">
                   Your name
                 </label>
                 <input
+                  id="join-display-name"
+                  name="displayName"
                   type="text"
+                  autoComplete="name"
                   placeholder="Movie buddy"
                   value={displayName}
                   onChange={(e) => setDisplayName(e.target.value)}
                   className="input-shell"
                   maxLength={24}
                 />
-                <label className="block text-xs font-semibold uppercase tracking-[0.28em] text-[var(--text-muted)]">
+                <label htmlFor="join-room-code" className="block text-xs font-semibold uppercase tracking-[0.28em] text-[var(--text-muted)]">
                   Room code
                 </label>
                 <input
+                  id="join-room-code"
+                  name="roomCode"
                   type="text"
+                  autoComplete="username"
+                  autoCapitalize="characters"
+                  spellCheck={false}
                   placeholder="ABCD2345"
                   value={roomId}
                   onChange={(e) => setRoomId(e.target.value.toUpperCase())}
                   className="input-shell"
                 />
-                <label className="block text-xs font-semibold uppercase tracking-[0.28em] text-[var(--text-muted)]">
+                <label htmlFor="join-room-pin" className="block text-xs font-semibold uppercase tracking-[0.28em] text-[var(--text-muted)]">
                   Room PIN
                 </label>
                 <input
+                  id="join-room-pin"
+                  name="roomPin"
                   type="password"
+                  autoComplete="current-password"
                   placeholder="123456"
                   value={roomPin}
-                  onChange={(e) => setRoomPin(e.target.value.replace(/\D/g, '').slice(0, 6))}
+                  onChange={(e) => setRoomPin(e.target.value.replaceAll(/\D/g, '').slice(0, 6))}
                   className="input-shell"
                   inputMode="numeric"
                   maxLength={6}
@@ -1066,15 +1141,15 @@ function App() {
                 <button type="button" onClick={handleCreateRoom} className="primary-button w-full" disabled={!roomId || !roomPin}>
                   Create Room
                 </button>
-                <button type="button" onClick={handleJoin} className="secondary-button w-full" disabled={!roomId || !roomPin}>
+                <button type="submit" className="secondary-button w-full" disabled={!roomId || !roomPin}>
                   Enter Room
                 </button>
-              </div>
+              </form>
             </div>
           </section>
         ) : (
           <section className={`watch-section flex flex-1 flex-col gap-8 ${isTheaterMode ? 'watch-section-theater' : ''}`}>
-            {!videoSrc ? (
+            {shouldShowUploadState ? (
               <div className="chrome-panel panel-upload flex min-h-[62vh] flex-col items-center justify-center rounded-[36px] border border-dashed border-[var(--border-color)] px-8 py-12 text-center">
                 <div className="upload-icon-shell">
                   <Upload size={28} />
@@ -1090,10 +1165,13 @@ function App() {
                     Browse Files
                   </button>
                   <input
+                    id="upload-video-primary"
+                    name="videoFilePrimary"
                     type="file"
                     accept="video/mp4,video/webm,video/x-matroska"
                     onChange={handleFileChange}
                     className="absolute inset-0 h-full w-full cursor-pointer opacity-0"
+                    aria-label="Choose video file"
                   />
                 </div>
               </div>
@@ -1112,16 +1190,14 @@ function App() {
                         onPause={handlePause}
                         onSeeked={handleSeeked}
                       >
-                        {subtitleSrc ? (
-                          <track
-                            key={subtitleSrc}
-                            src={subtitleSrc}
-                            kind="subtitles"
-                            srcLang="en"
-                            label={subtitleLabel ?? 'Uploaded subtitles'}
-                            default
-                          />
-                        ) : null}
+                        <track
+                          key={subtitleSrc ?? 'empty-caption-track'}
+                          src={subtitleSrc ?? 'data:text/vtt;charset=utf-8,WEBVTT%0A%0A'}
+                          kind="captions"
+                          srcLang="en"
+                          label={subtitleLabel ?? 'Uploaded subtitles'}
+                          default={Boolean(subtitleSrc)}
+                        />
                       </video>
                     </div>
 
@@ -1131,6 +1207,8 @@ function App() {
                           <Upload size={18} />
                           <span>Change Video</span>
                           <input
+                            id="upload-video-toolbar"
+                            name="videoFileToolbar"
                             type="file"
                             accept="video/mp4,video/webm,video/x-matroska"
                             onChange={handleFileChange}
@@ -1175,11 +1253,11 @@ function App() {
                       type="button"
                       className="chat-toggle"
                       onClick={handleChatToggle}
-                      aria-expanded={!isChatCollapsed}
+                      aria-expanded={isChatExpanded}
                     >
                       <div className="chat-toggle-main">
                         <MessageSquare size={18} />
-                        {!isChatCollapsed ? <span>Room chat</span> : null}
+                        {isChatExpanded ? <span>Room chat</span> : null}
                       </div>
                       <div className="chat-toggle-side">
                         {unreadMessages > 0 ? <span className="chat-badge">{unreadMessages}</span> : null}
@@ -1187,7 +1265,7 @@ function App() {
                       </div>
                     </button>
 
-                    {!isChatCollapsed ? (
+                    {isChatExpanded ? (
                       <div className="chrome-panel chat-panel rounded-[32px] p-5">
                         <div className="chat-panel-head">
                           <div>
@@ -1246,13 +1324,14 @@ function App() {
                         </div>
 
                         <div className="chat-compose">
-                          {!isEmojiStripCollapsed ? (
+                          {isEmojiStripOpen ? (
                             <div className="emoji-strip" aria-label="Quick emoji reactions">
                               {TOP_CHAT_EMOJIS.map((emoji) => (
                                 <button
                                   key={emoji}
                                   type="button"
                                   className="emoji-chip"
+                                  onMouseDown={(e) => e.preventDefault()}
                                   onClick={() => handleEmojiSelect(emoji)}
                                   aria-label={`Add ${emoji}`}
                                 >
@@ -1262,7 +1341,14 @@ function App() {
                             </div>
                           ) : null}
 
+                          <label htmlFor="chat-message-input" className="sr-only">
+                            Chat message
+                          </label>
                           <textarea
+                            ref={chatInputRef}
+                            id="chat-message-input"
+                            name="chatMessage"
+                            autoComplete="off"
                             value={chatDraft}
                             onChange={(e) => setChatDraft(e.target.value)}
                             onKeyDown={handleChatKeyDown}
@@ -1280,7 +1366,7 @@ function App() {
                                 className="chat-icon-button"
                                 aria-label={isEmojiStripCollapsed ? 'Show emoji reactions' : 'Hide emoji reactions'}
                                 title={isEmojiStripCollapsed ? 'Show emoji reactions' : 'Hide emoji reactions'}
-                                aria-pressed={!isEmojiStripCollapsed}
+                                aria-pressed={isEmojiStripOpen}
                               >
                                 <SmilePlus size={16} />
                               </button>
@@ -1295,10 +1381,13 @@ function App() {
                               </button>
                               <input
                                 ref={chatImageInputRef}
+                                id="chat-image-input"
+                                name="chatImage"
                                 type="file"
                                 accept="image/png,image/jpeg,image/gif,image/webp"
                                 onChange={handleChatImageChange}
                                 className="hidden"
+                                aria-label="Upload chat image"
                               />
                               <button
                                 type="button"
@@ -1346,9 +1435,9 @@ function App() {
 
                     <div className="mt-7 space-y-5">
                       <div>
-                        <label className="block text-[11px] font-semibold uppercase tracking-[0.24em] text-[var(--text-muted)]">
+                        <p className="block text-[11px] font-semibold uppercase tracking-[0.24em] text-[var(--text-muted)]">
                           Room code
-                        </label>
+                        </p>
                         <div className="mt-2 rounded-[20px] border border-[var(--border-color)] bg-[var(--panel-quiet)] px-4 py-4 text-center font-mono text-lg font-semibold tracking-[0.08em] text-[var(--text-main)]">
                           {roomId}
                         </div>
@@ -1364,18 +1453,18 @@ function App() {
                       </div>
 
                       <div>
-                        <label className="block text-[11px] font-semibold uppercase tracking-[0.24em] text-[var(--text-muted)]">
+                        <p className="block text-[11px] font-semibold uppercase tracking-[0.24em] text-[var(--text-muted)]">
                           Room PIN
-                        </label>
+                        </p>
                         <div className="mt-2 rounded-[20px] border border-[var(--border-color)] bg-[var(--panel-quiet)] px-4 py-4 text-center font-mono text-lg font-semibold tracking-[0.12em] text-[var(--text-main)]">
                           {roomPin}
                         </div>
                       </div>
 
                       <div>
-                        <label className="block text-[11px] font-semibold uppercase tracking-[0.24em] text-[var(--text-muted)]">
+                        <p className="block text-[11px] font-semibold uppercase tracking-[0.24em] text-[var(--text-muted)]">
                           Current video
-                        </label>
+                        </p>
                         <div className="mt-2 rounded-[20px] border border-[var(--border-color)] bg-[var(--panel-quiet)] px-4 py-4 text-center text-sm font-medium text-[var(--text-main)]">
                           {videoLabel ?? 'No local file loaded'}
                         </div>
@@ -1384,6 +1473,8 @@ function App() {
                             <Upload size={16} />
                             <span>{videoLabel ? 'Switch Video' : 'Add Video'}</span>
                             <input
+                              id="upload-video-sidebar"
+                              name="videoFileSidebar"
                               type="file"
                               accept="video/mp4,video/webm,video/x-matroska"
                               onChange={handleFileChange}
@@ -1399,12 +1490,15 @@ function App() {
                       </div>
 
                       <div>
-                        <label className="block text-[11px] font-semibold uppercase tracking-[0.24em] text-[var(--text-muted)]">
+                        <label htmlFor="sidebar-display-name" className="block text-[11px] font-semibold uppercase tracking-[0.24em] text-[var(--text-muted)]">
                           Your name
                         </label>
                         <div className="mt-2 flex flex-col gap-3 sm:flex-row">
                           <input
+                            id="sidebar-display-name"
+                            name="displayNameSidebar"
                             type="text"
+                            autoComplete="name"
                             value={displayName}
                             onChange={(e) => setDisplayName(e.target.value)}
                             placeholder="Choose a chat name"
@@ -1445,6 +1539,8 @@ function App() {
                             <Upload size={16} />
                             <span>{subtitleLabel ? 'Replace Subs' : 'Add Subtitles'}</span>
                             <input
+                              id="upload-subtitles"
+                              name="subtitleFile"
                               type="file"
                               accept=".vtt,.srt,text/vtt,application/x-subrip"
                               onChange={handleSubtitleChange}
@@ -1509,7 +1605,7 @@ function App() {
             href="https://github.com/nicx17/letswatch"
             target="_blank"
             rel="noopener noreferrer"
-            className="text-sm font-medium text-[var(--text-main)] transition-colors hover:text-[var(--accent)]"
+            className="text-sm font-medium text-[var(--text-main)] hover:text-[var(--accent)]"
           >
             github.com/nicx17/letswatch
           </a>

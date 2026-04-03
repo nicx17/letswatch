@@ -11,6 +11,8 @@ Lets Watch is a local-first watch-party app for self-hosted environments. Each v
 - Keeps media local to each participant instead of uploading it to the server.
 - Broadcasts chat messages live without storing chat history on the server.
 - Includes basic hardening such as Helmet, payload validation with Zod, and lightweight rate limiting.
+- Obfuscates sensitive identifiers in backend logs so room and participant metadata are not written in plain text.
+- Applies dedicated authentication throttling to room create/join flows to reduce brute-force attempts.
 
 ## Repository Layout
 
@@ -96,12 +98,20 @@ What these commands do:
 - The backend serves `client/dist` when `NODE_ENV=production`.
 - Static assets under `/assets` are cached aggressively because Vite fingerprints them.
 - `index.html` is served with `no-store` caching so browsers always pick up the latest asset references.
+- In production, `index.html` is served through a nonce-injecting response path so CSP `script-src` remains strict while app bundles still load.
+- Open the app at `/` in production. Direct `/index.html` requests are redirected to `/` so CSP nonce injection is consistently applied.
 - Chat images are resized in the browser before they are sent over Socket.IO.
 - Joining an existing room requires both the chosen room code and its 6-digit PIN.
 - Room codes are normalized to uppercase and PIN inputs are reduced to six digits during create and join.
 - Rooms also expose a copyable share link with a room-specific token so invite links can join directly without re-entering the PIN.
 - PIN-based joins rotate the current share token, so older copied links stop working after a fresh PIN join.
 - Room state is in-memory only. When the last participant disconnects, room membership and playback state are dropped.
+
+## Security Headers Summary
+
+- CSP is emitted as an HTTP response header and uses nonce-augmented `script-src` with strict-dynamic support (without `unsafe-inline` for scripts).
+- Trusted Types directives are enabled server-side, and the client bootstraps a defensive default policy that rejects untrusted sink content.
+- HSTS is enabled in production with long max-age, subdomain coverage, and preload.
 
 See [`DEPLOYMENT.md`](DEPLOYMENT.md) for a full deployment walkthrough.
 

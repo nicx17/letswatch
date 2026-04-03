@@ -15,13 +15,25 @@ That keeps the data surface small, but it does not eliminate the need for runtim
 
 ### HTTP and Browser-Facing Headers
 
-The Express server uses `helmet` to set security-focused response headers and a custom CSP that still allows:
+The Express server uses `helmet` and a custom CSP response-header middleware.
+
+Current behavior includes:
+
+- nonce-based `script-src` with `strict-dynamic` support for stronger XSS resistance (without `unsafe-inline` in scripts)
+- Trusted Types directives in CSP (`trusted-types` and `require-trusted-types-for 'script'`)
+- HSTS in production with long max-age, subdomains, and preload
+
+On the client bootstrap path, a defensive Trusted Types default policy is created when available. It rejects untrusted values for HTML/script/scriptURL sinks instead of allowing pass-through values.
+
+The CSP still allows:
 
 - local media playback from `blob:`
 - inline styles used by the current frontend
 - Cloudflare Insights scripts if they are enabled
 
 The server also enables `compression` for text-based responses.
+
+To keep nonce injection reliable, production `index.html` is not served directly by static middleware; the app serves it through a response path that injects nonces per request.
 
 ### Input Validation
 
@@ -49,9 +61,21 @@ The server stores only a salted hash of the PIN in memory for the active room li
 It also stores only a hash of the active share token in memory rather than the raw token.
 Room codes are normalized to uppercase before lookup, and PIN values are trimmed before hash verification so harmless input formatting does not cause false credential failures.
 
+PIN hashes now use a versioned scrypt format for new rooms, and verification keeps a backward-compatible fallback path for legacy hash values.
+
 ### Rate Limiting
 
 The backend keeps a lightweight per-socket rate-limit window for room events. It is intentionally simple and in-memory, which makes it suitable for a single-process deployment but not for distributed rate limiting across multiple instances.
+
+Authentication-related flows (create room, join with PIN, and join by share link) now have a dedicated throttle budget that is separate from normal room event rate limits.
+
+### Log Privacy
+
+Server logs now sanitize metadata before emission:
+
+- sensitive keys (room IDs, participant IDs, socket IDs, tokens, hashes, pins, and related fields) are obfuscated
+- obfuscation is deterministic per value, which preserves correlation without exposing raw secrets
+- non-sensitive operational values remain readable for debugging
 
 ### Room Cleanup
 

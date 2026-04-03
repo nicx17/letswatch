@@ -60,6 +60,11 @@ npm run start
 
 The production process expects `client/dist` to already exist.
 
+Important runtime note:
+
+- In production, open the app via `/` rather than `/index.html`.
+- The server injects CSP nonces into HTML before responding, and direct `/index.html` is redirected to `/` to preserve that behavior.
+
 ## 5. Process Management
 
 Using `pm2` is a straightforward way to keep the server alive:
@@ -83,9 +88,12 @@ If you run the app behind Nginx, Caddy, or another reverse proxy:
 After deployment, verify:
 
 - the frontend loads successfully from the public origin
+- the HTML response includes a CSP header and script tags include CSP nonces
+- loading `/index.html` redirects to `/`
 - the browser can connect to Socket.IO
 - a new room can be created with a chosen room code and 6-digit PIN
 - a second device can only join with the correct room code and PIN
+- repeated failed room-join attempts are throttled with a retry-later response
 - the `Copy Room Link` action produces a URL containing both a room code and a token
 - opening that shared link joins the room without re-entering the PIN
 - joining again with the PIN rotates the share token so older links stop working
@@ -94,6 +102,7 @@ After deployment, verify:
 - live chat works for text, quick emoji reactions, and a small image message
 - the `client/dist` assets are being served
 - `index.html` is returning fresh cache headers after a deploy
+- HSTS is present in production responses (with includeSubDomains and preload)
 - rooms disappear after the last participant leaves and do not recover old chat history on rejoin
 
 ## CI And Release Hygiene
