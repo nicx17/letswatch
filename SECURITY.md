@@ -2,157 +2,162 @@
 
 ## Scope
 
-Lets Watch is designed around a local-first media model:
+Current repository behavior:
 
 - Video files stay on each participant's machine.
-- The server only stores room metadata and playback state in memory while a room is active.
-- Chat is broadcast live and is not persisted in memory after delivery.
-- No database, file upload pipeline, or persistent media storage is part of the current architecture.
+- The server keeps room metadata and playback state in memory while a room is active.
+- Chat is broadcast live and is not persisted after delivery.
+- There is no database, upload pipeline, or persistent media storage in this repository.
 
-That keeps the data surface small, but it does not eliminate the need for runtime hardening on the sync layer.
+## Implemented Controls
 
-## Controls Currently Implemented
+### HTTP Headers
 
-### HTTP and Browser-Facing Headers
+The server uses `helmet` and sets production security headers for the unified frontend/backend deployment.
 
-The Express server uses `helmet` and a custom CSP response-header middleware.
+Current header behavior:
 
-Current behavior includes:
+- HSTS is enabled in production.
+- CSP uses a per-response nonce on scripts.
+- Trusted Types is enabled with `require-trusted-types-for 'script'`.
+- `frame-ancestors` is set to `none`.
+- `object-src` is set to `none`.
 
-- nonce-based `script-src` with `strict-dynamic` support for stronger XSS resistance (without `unsafe-inline` in scripts)
-- Trusted Types restrictions in CSP (`trusted-types default` and `require-trusted-types-for 'script'`)
-- HSTS in production with long max-age, subdomains, and preload
-
-To keep enforced Trusted Types compatible with runtime script paths, production HTML responses inject an early default Trusted Types policy bootstrap before app scripts execute.
-
-The CSP still allows:
-
-- local media playback from `blob:`
-- inline styles used by the current frontend
-- Cloudflare Insights scripts if they are enabled
-
-The server also enables `compression` for text-based responses.
-
-To keep nonce injection reliable, production `index.html` is not served directly by static middleware; the app serves it through a response path that injects nonces per request.
+The production HTML shell is served through a server-side render path so the nonce can be added before the response is sent.
 
 ### Input Validation
 
-Incoming `sync_state` payloads are validated with Zod before room state is updated. This prevents malformed payloads from being written into the shared in-memory state map.
+The server validates the following inputs with Zod:
 
-Chat payloads are also validated:
+- room creation payloads
+- room join payloads
+- share-link join payloads
+- playback sync payloads
+- display names
+- chat text payloads
+- chat image payloads
 
-- text messages must be non-empty and stay within the server-side length cap
-- image messages must be `data:image/...;base64,...` payloads and stay under the configured payload limit
-- display names are length-bounded before they are accepted
+Chat image payloads are restricted to `data:image/...;base64,...` values and are bounded in size.
 
-### Room Membership Enforcement
+Socket event handlers also tolerate malformed frames and missing acknowledgement callbacks without throwing.
 
-Room-scoped events require the socket to be part of the room before the backend will return or update shared playback state.
+### Room Access
 
-### Room Credentials
+Room access is based on one of the following:
 
-Rooms are now created with:
+- room code + 6-digit PIN
+- room code + current share token
 
-- a user-chosen room code
-- a 6-digit PIN required for join and reconnect
-- a room-specific share token used in copied invite links
+Implementation details:
 
-The server stores only a salted hash of the PIN in memory for the active room lifetime.
-It also stores only a hash of the active share token in memory rather than the raw token.
-Room codes are normalized to uppercase before lookup, and PIN values are trimmed before hash verification so harmless input formatting does not cause false credential failures.
+- room codes are normalized to uppercase
+- PINs are normalized before verification
+- the server stores a salted PIN hash, not the raw PIN
+- the server stores a hash of the current share token, not the raw token
+- PIN-based joins rotate the share token
 
-PIN hashes now use a versioned scrypt format for new rooms, and verification keeps a backward-compatible fallback path for legacy hash values.
+New rooms use versioned `scrypt` PIN hashes. Legacy hash verification remains in place for older in-memory room formats.
+
+### Membership Checks
+
+Room-scoped actions require the socket to already be attached to the room:
+
+- playback state updates
+- playback state reads
+- display name updates
+- chat messages
+
+Participant lists exposed to the client use opaque participant IDs rather than raw socket IDs.
 
 ### Rate Limiting
 
-The backend keeps a lightweight per-socket rate-limit window for room events. It is intentionally simple and in-memory, which makes it suitable for a single-process deployment but not for distributed rate limiting across multiple instances.
+This repository uses in-memory rate limiting.
 
-Authentication-related flows (create room, join with PIN, and join by share link) now have a dedicated throttle budget that is separate from normal room event rate limits.
+Current limiter behavior:
 
-### Log Privacy
+- normal room events are limited per socket
+- image chat sends have a separate per-socket limit
+- auth flows have a separate limit keyed by client identity and room scope
+- limiter entries are pruned after expiry
+- socket-owned limiter entries are deleted on disconnect
 
-Server logs now sanitize metadata before emission:
+This limiter is process-local and does not coordinate across replicas.
 
-- sensitive keys (room IDs, participant IDs, socket IDs, tokens, hashes, pins, and related fields) are obfuscated
-- obfuscation is deterministic per value, which preserves correlation without exposing raw secrets
-- non-sensitive operational values remain readable for debugging
+### Logging
 
-### Room Cleanup
+Structured server logs redact or obfuscate sensitive values such as:
 
-Room membership is cleaned up on disconnect, and empty rooms are deleted automatically.
+- room identifiers
+- participant identifiers
+- socket identifiers
+- PINs
+- tokens
+- hashes
 
-Because rooms are deleted when the final participant leaves:
+## Current Limitations
 
-- room playback state is forgotten
-- viewer display names are forgotten
-- there is no chat history to recover
+### Authentication Model
 
-### Static Asset Caching
+This repository does not implement user accounts or long-lived identity.
 
-Production static files are served with cache settings that match their role:
+Anyone with:
 
-- fingerprinted assets under `/assets` are cached long-term
-- `index.html` is intentionally not cached
+- the room code and valid PIN, or
+- a current share link token
 
-## Important Limitations
+can join the room and interact with it.
 
-These are not hidden footnotes. They are the current boundaries of the implementation and should be considered before exposing the service publicly.
+### Process Model
 
-### Room Access Is Based On Knowing The Room ID And PIN Or Having A Valid Share Link
+All room state is stored in process memory.
 
-The join path is now better than room-ID-only access, but it is still lightweight room authentication rather than user authentication. Anyone who can obtain both the room code and PIN, or a currently valid share link containing the room token, can join and interact with that room.
+Effects of a restart:
 
-This matters more now that the room also exposes:
+- active rooms are lost
+- playback state is lost
+- participant lists are lost
+- chat history is not recoverable
 
-- participant display names
-- live chat traffic
-- inline image chat messages
+### DoS Boundaries
 
-PIN-based joins rotate the active share token, which helps invalidate older copied links, but the current model still treats the link itself as a bearer credential.
+The current implementation reduces several low-effort abuse paths, but it is still a single-process Node service.
 
-### CORS Is Not Authorization
+Important boundaries:
 
-The project configures CORS for Express and Socket.IO polling requests, but CORS does not stop non-browser clients from reaching the backend. Socket.IO's WebSocket transport is also not governed by browser CORS in the same way. Treat CORS here as browser configuration, not as access control.
+- auth hashing is asynchronous, but still consumes CPU and worker-thread capacity
+- rate limits are local to a single process
+- accepted chat images are still broadcast to all room members
+- malformed traffic still consumes parsing, validation, and logging work
+- the frontend shell is cached in memory, but requests still execute Express and Socket.IO admission logic
 
-### Rate Limiting Is Process-Local
+### CORS And Origin Checks
 
-The current limiter uses an in-memory `Map`. It resets on restart and does not coordinate across replicas.
+The repository uses:
 
-### Image Chat Still Consumes Bandwidth And Memory In Transit
+- Express CORS configuration
+- Socket.IO CORS configuration
+- a production Socket.IO `allowRequest` check
 
-Image messages are not stored server-side, but they still pass through the Socket.IO server and are broadcast to every connected room participant. Large or frequent image sends can still increase memory pressure, bandwidth use, and client-side rendering cost.
+These checks limit browser-origin traffic, but they are not a replacement for edge controls or network-level access controls.
 
-The current implementation reduces that risk by:
+## Deployment Expectations
 
-- compressing and resizing images in the browser before send
-- enforcing a Socket.IO buffer limit on the server
-- validating image message size and format with Zod
+For public deployments, this repository expects a reverse proxy or edge layer to handle:
 
-That is useful hardening, but it is not equivalent to a dedicated media pipeline with quotas or malware scanning.
+- TLS termination
+- connection limits
+- request size limits
+- IP-based rate limiting
+- log aggregation and monitoring
 
-### State Is Ephemeral
+## Repository Workflow
 
-All room state lives in memory. Restarting the server clears active rooms.
+The repository includes CI coverage for:
 
-### Participant Metadata Is Visible Inside The Room
+- lint
+- test
+- build
+- CodeQL
+- dependency review
 
-The server shares room membership updates with all room participants so the UI can show who is present. This is expected product behavior, but it also means display names are visible to everyone who joins that room.
-
-The client now receives opaque participant IDs instead of raw socket IDs, which reduces unnecessary exposure of internal connection identifiers.
-
-## Recommended Next Security Steps
-
-- Add expiry, revocation controls, or narrower scopes to share tokens if rooms are shared broadly.
-- Move rate limiting to a shared store if the service is scaled horizontally.
-- Add stricter quotas or per-room backoff for image chat if the service is exposed to untrusted users.
-- Add structured logging and alerting around rejected payloads and abuse spikes.
-
-## Repository Security Workflow
-
-The repo now includes:
-
-- CI checks for lint, test, and build
-- CodeQL scanning for JavaScript and TypeScript
-- dependency review checks on pull requests
-
-Together, those workflows help catch regressions early, but they do not replace application-layer authorization and threat modeling.
+These checks help catch regressions, but they do not replace deployment hardening or external abuse controls.

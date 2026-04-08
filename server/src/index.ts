@@ -1,6 +1,6 @@
 import 'dotenv/config';
-import express from 'express';
-import { createServer } from 'node:http';
+import express, { type Response } from 'express';
+import { createServer, IncomingMessage, type IncomingHttpHeaders } from 'node:http';
 import { Server } from 'socket.io';
 import cors from 'cors';
 import helmet from 'helmet';
@@ -9,7 +9,7 @@ import { z } from 'zod';
 import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { createHash, randomBytes, scryptSync, timingSafeEqual } from 'node:crypto';
+import { createHash, randomBytes, scrypt, timingSafeEqual } from 'node:crypto';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -17,6 +17,11 @@ const __dirname = path.dirname(__filename);
 const app = express();
 const LOG_NAMESPACE = 'server';
 const isProduction = process.env.NODE_ENV === 'production';
+const trustProxy = process.env.TRUST_PROXY === '1' || process.env.TRUST_PROXY === 'true';
+
+if (trustProxy) {
+  app.set('trust proxy', true);
+}
 
 type LogLevel = 'info' | 'warn' | 'error';
 
@@ -119,32 +124,31 @@ app.use(helmet({
         preload: true,
       }
     : false,
-  contentSecurityPolicy: false,
+  contentSecurityPolicy: {
+    useDefaults: false,
+    directives: {
+      "default-src": ["'self'"],
+      "script-src": [
+        "'self'",
+        "'strict-dynamic'",
+        (_req, res) => `'nonce-${String((res as Response).locals.cspNonce ?? '')}'`,
+        'https://static.cloudflareinsights.com',
+        "'sha256-xEpMjc29DxPGet3wD8QBTFXJ4vGx60/Y07K8AohTM/M='",
+        "'sha256-7/wUdeTePWyHkMlev6uiodRq0R9yxOUkCYi4Vu7T7nw='",
+      ],
+      "style-src": ["'self'", "'unsafe-inline'"],
+      "img-src": ["'self'", 'data:', 'blob:', 'https:'],
+      "connect-src": ["'self'", 'ws:', 'wss:', 'https://cloudflareinsights.com', 'https://static.cloudflareinsights.com'],
+      "media-src": ["'self'", 'blob:'],
+      "object-src": ["'none'"],
+      "base-uri": ["'self'"],
+      "frame-ancestors": ["'none'"],
+      "trusted-types": ['default'],
+      "require-trusted-types-for": ["'script'"],
+      "upgrade-insecure-requests": isProduction ? [] : null,
+    },
+  },
 }));
-
-app.use((_req, res, next) => {
-  const nonce = String(res.locals.cspNonce ?? '');
-  const directives = [
-    "default-src 'self'",
-    `script-src 'self' 'strict-dynamic' 'nonce-${nonce}' https://static.cloudflareinsights.com 'sha256-xEpMjc29DxPGet3wD8QBTFXJ4vGx60/Y07K8AohTM/M=' 'sha256-7/wUdeTePWyHkMlev6uiodRq0R9yxOUkCYi4Vu7T7nw='`,
-    "style-src 'self' 'unsafe-inline'",
-    "img-src 'self' data: blob: https:",
-    "connect-src 'self' ws: wss: https://cloudflareinsights.com https://static.cloudflareinsights.com",
-    "media-src 'self' blob:",
-    "object-src 'none'",
-    "base-uri 'self'",
-    "frame-ancestors 'none'",
-    "trusted-types default",
-    "require-trusted-types-for 'script'",
-  ];
-
-  if (isProduction) {
-    directives.push('upgrade-insecure-requests');
-  }
-
-  res.setHeader('Content-Security-Policy', directives.join('; '));
-  next();
-});
 
 type CspViolationReport = {
   'document-uri'?: string;
@@ -216,8 +220,59 @@ const getProductionOrigin = () => {
 };
 
 const productionOrigin = getProductionOrigin();
-const corsOrigin = productionOrigin ? [productionOrigin] : '*';
 const productionHost = productionOrigin ? new URL(productionOrigin).host : null;
+
+const isPrivateIpv4Host = (hostname: string) => {
+  const octets = hostname.split('.');
+  if (octets.length !== 4) return false;
+
+  const numbers = octets.map((segment) => Number.parseInt(segment, 10));
+  if (numbers.some((value) => Number.isNaN(value) || value < 0 || value > 255)) {
+    return false;
+  }
+
+  const first = numbers[0] ?? -1;
+  const second = numbers[1] ?? -1;
+  if (first === 10 || first === 127) return true;
+  if (first === 192 && second === 168) return true;
+  if (first === 172 && second >= 16 && second <= 31) return true;
+  if (first === 169 && second === 254) return true;
+  return false;
+};
+
+const isAllowedDevelopmentOrigin = (origin: string) => {
+  try {
+    const parsed = new URL(origin);
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+      return false;
+    }
+
+    return (
+      parsed.hostname === 'localhost' ||
+      parsed.hostname === '::1' ||
+      parsed.hostname === '[::1]' ||
+      isPrivateIpv4Host(parsed.hostname)
+    );
+  } catch {
+    return false;
+  }
+};
+
+const isAllowedCorsOrigin = (origin: string | undefined) => {
+  if (!origin) {
+    return true;
+  }
+
+  if (productionOrigin) {
+    return origin === productionOrigin;
+  }
+
+  return isAllowedDevelopmentOrigin(origin);
+};
+
+const corsOrigin = (origin: string | undefined, callback: (error: Error | null, allow?: boolean) => void) => {
+  callback(null, isAllowedCorsOrigin(origin));
+};
 
 app.use(cors({
   origin: corsOrigin,
@@ -225,6 +280,37 @@ app.use(cors({
 }));
 
 const server = createServer(app);
+
+const getSingleHeaderValue = (header: string | string[] | undefined) => {
+  if (Array.isArray(header)) {
+    return header[0];
+  }
+
+  return header;
+};
+
+const getSocketAck = <T extends unknown[]>(ack: unknown) => {
+  return typeof ack === 'function' ? ack as (...args: T) => void : undefined;
+};
+
+const getForwardedClientAddress = (headers: IncomingHttpHeaders | undefined) => {
+  if (!trustProxy) return undefined;
+
+  const forwardedFor = getSingleHeaderValue(headers?.['x-forwarded-for']);
+  if (!forwardedFor) return undefined;
+
+  const firstForwardedAddress = forwardedFor.split(',')[0]?.trim();
+  return firstForwardedAddress || undefined;
+};
+
+const getSocketClientIdentity = (socket: { handshake: { address: string; headers: IncomingHttpHeaders } }) =>
+  getForwardedClientAddress(socket.handshake.headers) ||
+  socket.handshake.address ||
+  'unknown-client';
+
+const getProductionRequestHost = (req: IncomingMessage) =>
+  getSingleHeaderValue(req.headers.host);
+
 const io = new Server(server, {
   cors: {
     origin: corsOrigin,
@@ -245,13 +331,10 @@ const io = new Server(server, {
       return;
     }
 
-    // Same-origin polling requests may omit the Origin header. Fall back to the
-    // forwarded/public host so production deployments still connect cleanly.
-    const forwardedHostHeader = req.headers['x-forwarded-host'];
-    const requestHost = Array.isArray(forwardedHostHeader)
-      ? forwardedHostHeader[0]
-      : forwardedHostHeader || req.headers.host;
-
+    // Same-origin polling requests may omit the Origin header. Only trust the
+    // effective Host header here; proxy-only forwarded headers are not a safe
+    // authentication signal once traffic reaches the app.
+    const requestHost = getProductionRequestHost(req);
     callback(null, requestHost === productionHost);
   },
 });
@@ -304,19 +387,55 @@ export const rooms = new Map<string, SyncSession>();
 
 // Keep a lightweight per-socket budget to avoid noisy clients spamming room events.
 const rateLimits = new Map<string, { count: number, resetAt: number }>();
-const consumeRateLimit = (key: string, limit: number, windowMs: number) => {
+const socketOwnedRateLimitKeys = new Map<string, Set<string>>();
+const pruneExpiredRateLimits = (now: number) => {
+  for (const [key, record] of rateLimits.entries()) {
+    if (record.resetAt < now) {
+      rateLimits.delete(key);
+    }
+  }
+
+  for (const [socketId, keys] of socketOwnedRateLimitKeys.entries()) {
+    const activeKeys = [...keys].filter((key) => rateLimits.has(key));
+    if (activeKeys.length === 0) {
+      socketOwnedRateLimitKeys.delete(socketId);
+      continue;
+    }
+
+    socketOwnedRateLimitKeys.set(socketId, new Set(activeKeys));
+  }
+};
+
+const registerSocketOwnedRateLimitKey = (socketId: string, key: string) => {
+  const existingKeys = socketOwnedRateLimitKeys.get(socketId) ?? new Set<string>();
+  existingKeys.add(key);
+  socketOwnedRateLimitKeys.set(socketId, existingKeys);
+};
+
+const consumeRateLimit = (
+  key: string,
+  limit: number,
+  windowMs: number,
+  ownerSocketId?: string,
+) => {
   const now = Date.now();
+  pruneExpiredRateLimits(now);
   let record = rateLimits.get(key);
   if (!record || record.resetAt < now) {
     record = { count: 0, resetAt: now + windowMs };
     rateLimits.set(key, record);
   }
   record.count++;
+  if (ownerSocketId) {
+    registerSocketOwnedRateLimitKey(ownerSocketId, key);
+  }
   return record.count > limit;
 };
-export const isRateLimited = (socketId: string) => consumeRateLimit(socketId, 15, 2000);
-const isAuthRateLimited = (socketId: string) => consumeRateLimit(`${socketId}:auth`, 8, 10_000);
-const isImageRateLimited = (socketId: string) => consumeRateLimit(`${socketId}:image`, 3, 30000);
+export const isRateLimited = (socketId: string) => consumeRateLimit(socketId, 15, 2000, socketId);
+const buildAuthRateLimitKey = (clientIdentity: string, roomScope: string) => `auth:${clientIdentity}:${roomScope}`;
+const isAuthRateLimited = (clientIdentity: string, roomScope: string) =>
+  consumeRateLimit(buildAuthRateLimitKey(clientIdentity, roomScope), 8, 10_000);
+const isImageRateLimited = (socketId: string) => consumeRateLimit(`${socketId}:image`, 3, 30000, socketId);
 
 export const SeekSchema = z.object({
   position: z.number().nonnegative(),
@@ -389,12 +508,25 @@ const PIN_SCRYPT_KEY_LENGTH = 64;
 const createLegacyPinHash = (pin: string, salt: string) =>
   createHash('sha256').update(`${salt}:${pin}`).digest('hex');
 
-const createPinHash = (pin: string, salt: string) => {
-  const hash = scryptSync(pin, salt, PIN_SCRYPT_KEY_LENGTH, {
-    N: PIN_SCRYPT_COST,
-    r: PIN_SCRYPT_BLOCK_SIZE,
-    p: PIN_SCRYPT_PARALLELIZATION,
-  }).toString('hex');
+const scryptPin = (pin: string, salt: string) =>
+  new Promise<Buffer>((resolve, reject) => {
+    scrypt(pin, salt, PIN_SCRYPT_KEY_LENGTH, {
+      N: PIN_SCRYPT_COST,
+      r: PIN_SCRYPT_BLOCK_SIZE,
+      p: PIN_SCRYPT_PARALLELIZATION,
+    }, (error, derivedKey) => {
+      if (error) {
+        reject(error);
+        return;
+      }
+
+      resolve(Buffer.from(derivedKey));
+    });
+  });
+
+const createPinHash = async (pin: string, salt: string) => {
+  const hashBuffer = await scryptPin(pin, salt);
+  const hash = hashBuffer.toString('hex');
 
   return `${PIN_HASH_VERSION}$${hash}`;
 };
@@ -411,11 +543,12 @@ const splitVersionedPinHash = (pinHash: string) => {
 const hashShareToken = (shareToken: string) =>
   createHash('sha256').update(`share:${shareToken}`).digest('hex');
 
-const verifyPin = (room: SyncSession, pin: string) => {
+const verifyPin = async (room: SyncSession, pin: string) => {
   const versionedHash = splitVersionedPinHash(room.pinHash);
   if (versionedHash?.version === PIN_HASH_VERSION) {
     const expectedHash = Buffer.from(versionedHash.hash, 'hex');
-    const providedHash = Buffer.from(createPinHash(pin, room.pinSalt).split('$', 2)[1] ?? '', 'hex');
+    const providedVersionedHash = await createPinHash(pin, room.pinSalt);
+    const providedHash = Buffer.from(providedVersionedHash.split('$', 2)[1] ?? '', 'hex');
     return expectedHash.length === providedHash.length && timingSafeEqual(expectedHash, providedHash);
   }
 
@@ -433,6 +566,18 @@ const verifyShareToken = (room: SyncSession, shareToken: string) => {
 
 const createParticipantId = () => randomBytes(6).toString('base64url');
 const createShareToken = () => randomBytes(18).toString('base64url');
+const buildSyncStateSnapshot = (room: SyncSession): SyncState => {
+  const snapshotTime = Date.now();
+  const elapsedSeconds = room.state.playing
+    ? Math.max(0, (snapshotTime - room.state.updatedAt) / 1000)
+    : 0;
+
+  return {
+    position: room.state.position + elapsedSeconds,
+    playing: room.state.playing,
+    updatedAt: snapshotTime,
+  };
+};
 
 const emitRoomPeople = (roomId: string, room: SyncSession) => {
   io.to(roomId).emit('participants_updated', room.memberProfiles.map((member) => member.participantId));
@@ -477,12 +622,49 @@ const attachSocketToRoom = (
 export const resetRuntimeState = () => {
   rooms.clear();
   rateLimits.clear();
+  socketOwnedRateLimitKeys.clear();
 };
 
-export const createRoomForSocket = (
+export const addNonceToScriptTags = (html: string, nonce: string) => {
+  const lowerHtml = html.toLowerCase();
+  let cursor = 0;
+  let output = '';
+
+  while (cursor < html.length) {
+    const scriptStart = lowerHtml.indexOf('<script', cursor);
+    if (scriptStart === -1) {
+      return output + html.slice(cursor);
+    }
+
+    const boundary = lowerHtml[scriptStart + 7];
+    if (boundary && ![' ', '\n', '\r', '\t', '>'].includes(boundary)) {
+      output += html.slice(cursor, scriptStart + 7);
+      cursor = scriptStart + 7;
+      continue;
+    }
+
+    const insertionPoint = scriptStart + 7;
+    output += `${html.slice(cursor, insertionPoint)} nonce="${nonce}"`;
+    cursor = insertionPoint;
+  }
+
+  return output;
+};
+
+export const injectHtmlIntoHead = (html: string, markup: string) => {
+  const headCloseIndex = html.toLowerCase().indexOf('</head>');
+  if (headCloseIndex === -1) {
+    return `${markup}${html}`;
+  }
+
+  return `${html.slice(0, headCloseIndex)}${markup}${html.slice(headCloseIndex)}`;
+};
+
+export const createRoomForSocket = async (
   socketId: string,
   payload?: { roomId: string; pin: string; displayName?: string },
-): RoomOperationResult<{
+  clientIdentity = socketId,
+): Promise<RoomOperationResult<{
   roomId: string;
   pin: string;
   shareToken: string;
@@ -490,8 +672,8 @@ export const createRoomForSocket = (
   participants: string[];
   memberProfiles: Array<{ participantId: string; displayName: string }>;
   selfParticipantId: string;
-}> => {
-  if (isAuthRateLimited(socketId)) {
+}>> => {
+  if (isAuthRateLimited(clientIdentity, 'create')) {
     return { success: false, error: 'Too many authentication attempts. Please wait a moment and try again.' };
   }
 
@@ -511,7 +693,7 @@ export const createRoomForSocket = (
   const participantId = createParticipantId();
   const room: SyncSession = {
     id: roomId,
-    pinHash: createPinHash(pin, pinSalt),
+    pinHash: await createPinHash(pin, pinSalt),
     pinSalt,
     shareTokenHash: hashShareToken(shareToken),
     state: {
@@ -534,38 +716,38 @@ export const createRoomForSocket = (
     roomId,
     pin,
     shareToken,
-    state: room.state,
+    state: buildSyncStateSnapshot(room),
     participants: [participantId],
     memberProfiles: buildParticipantProfiles(room),
     selfParticipantId: participantId,
   };
 };
 
-export const joinRoomForSocket = (
+export const joinRoomForSocket = async (
   socketId: string,
   payload: { roomId: string; pin: string; displayName?: string },
-): RoomOperationResult<{
+  clientIdentity = socketId,
+): Promise<RoomOperationResult<{
   roomId: string;
   shareToken: string;
   state: SyncState;
   participants: string[];
   memberProfiles: Array<{ participantId: string; displayName: string }>;
   selfParticipantId?: string;
-}> => {
-  if (isAuthRateLimited(socketId)) {
-    return { success: false, error: 'Too many authentication attempts. Please wait a moment and try again.' };
-  }
-
+}>> => {
   const parsedPayload = JoinRoomSchema.safeParse(payload);
   if (!parsedPayload.success) {
     return { success: false, error: 'Invalid room credentials' };
   }
 
   const roomId = normalizeRoomId(parsedPayload.data.roomId);
+  if (isAuthRateLimited(clientIdentity, roomId)) {
+    return { success: false, error: 'Too many authentication attempts. Please wait a moment and try again.' };
+  }
   const pin = normalizePin(parsedPayload.data.pin);
   const { displayName } = parsedPayload.data;
   const room = rooms.get(roomId);
-  if (!room || !verifyPin(room, pin)) {
+  if (!room || !await verifyPin(room, pin)) {
     return { success: false, error: 'Room not found or PIN is incorrect' };
   }
 
@@ -581,34 +763,34 @@ export const joinRoomForSocket = (
     success: true,
     roomId,
     shareToken,
-    state: room.state,
+    state: buildSyncStateSnapshot(room),
     participants: room.memberProfiles.map((member) => member.participantId),
     memberProfiles: buildParticipantProfiles(room),
     ...(attachResult.currentMember ? { selfParticipantId: attachResult.currentMember.participantId } : {}),
   };
 };
 
-export const joinRoomByLinkForSocket = (
+export const joinRoomByLinkForSocket = async (
   socketId: string,
   payload: { roomId: string; shareToken: string; displayName?: string },
-): RoomOperationResult<{
+  clientIdentity = socketId,
+): Promise<RoomOperationResult<{
   roomId: string;
   shareToken: string;
   state: SyncState;
   participants: string[];
   memberProfiles: Array<{ participantId: string; displayName: string }>;
   selfParticipantId?: string;
-}> => {
-  if (isAuthRateLimited(socketId)) {
-    return { success: false, error: 'Too many authentication attempts. Please wait a moment and try again.' };
-  }
-
+}>> => {
   const parsedPayload = LinkJoinRoomSchema.safeParse(payload);
   if (!parsedPayload.success) {
     return { success: false, error: 'Invalid room link' };
   }
 
   const roomId = normalizeRoomId(parsedPayload.data.roomId);
+  if (isAuthRateLimited(clientIdentity, roomId)) {
+    return { success: false, error: 'Too many authentication attempts. Please wait a moment and try again.' };
+  }
   const shareToken = parsedPayload.data.shareToken.trim();
   const room = rooms.get(roomId);
   if (!room) {
@@ -627,7 +809,7 @@ export const joinRoomByLinkForSocket = (
     success: true,
     roomId,
     shareToken,
-    state: room.state,
+    state: buildSyncStateSnapshot(room),
     participants: room.memberProfiles.map((member) => member.participantId),
     memberProfiles: buildParticipantProfiles(room),
     ...(attachResult.currentMember ? { selfParticipantId: attachResult.currentMember.participantId } : {}),
@@ -660,7 +842,7 @@ export const applySyncStateForSocket = (
   room.state.playing = update.playing;
   room.state.updatedAt = Date.now();
 
-  return { success: true as const, state: room.state };
+  return { success: true as const, state: buildSyncStateSnapshot(room) };
 };
 
 export const requestSyncStateForSocket = (socketId: string, roomId: string) => {
@@ -672,7 +854,7 @@ export const requestSyncStateForSocket = (socketId: string, roomId: string) => {
     return { success: false as const, error: 'Room not found' };
   }
 
-  return { success: true as const, state: room.state };
+  return { success: true as const, state: buildSyncStateSnapshot(room) };
 };
 
 export const setDisplayNameForSocket = (
@@ -747,6 +929,14 @@ export const sendChatMessageForSocket = (
 };
 
 export const disconnectSocket = (socketId: string) => {
+  const ownedRateLimitKeys = socketOwnedRateLimitKeys.get(socketId);
+  if (ownedRateLimitKeys) {
+    ownedRateLimitKeys.forEach((key) => {
+      rateLimits.delete(key);
+    });
+    socketOwnedRateLimitKeys.delete(socketId);
+  }
+
   rateLimits.delete(socketId);
   const updatedRoomIds: string[] = [];
   const deletedRoomIds: string[] = [];
@@ -771,95 +961,156 @@ export const disconnectSocket = (socketId: string) => {
 
 io.on('connection', (socket) => {
   writeLog('info', 'socket.connected', { socketId: socket.id });
+  const clientIdentity = getSocketClientIdentity(socket);
 
-  socket.on('create_room', (payload: { roomId: string; pin: string; displayName?: string } | undefined, cb) => {
-    const response = createRoomForSocket(socket.id, payload);
-    if (!response.success) {
-      writeLog('warn', 'room.create.rejected', {
+  socket.on('create_room', async (payload: { roomId: string; pin: string; displayName?: string } | undefined, cb) => {
+    const ack = getSocketAck<[RoomOperationResult<{
+      roomId: string;
+      pin: string;
+      shareToken: string;
+      state: SyncState;
+      participants: string[];
+      memberProfiles: Array<{ participantId: string; displayName: string }>;
+      selfParticipantId: string;
+    }>]> (cb);
+    try {
+      const response = await createRoomForSocket(socket.id, payload, clientIdentity);
+      if (!response.success) {
+        writeLog('warn', 'room.create.rejected', {
+          socketId: socket.id,
+          reason: response.error,
+        });
+        ack?.(response);
+        return;
+      }
+      writeLog('info', 'room.created', {
+        roomId: response.roomId,
         socketId: socket.id,
-        reason: response.error,
+        participantId: response.selfParticipantId,
       });
-      return cb(response);
+      socket.join(response.roomId);
+      ack?.(response);
+      const room = rooms.get(response.roomId);
+      if (room) {
+        emitRoomPeople(response.roomId, room);
+      }
+    } catch (error) {
+      writeLog('error', 'room.create.failed', {
+        socketId: socket.id,
+        message: error instanceof Error ? error.message : String(error),
+      });
+      ack?.({ success: false, error: 'Unable to create room right now' });
     }
-    writeLog('info', 'room.created', {
-      roomId: response.roomId,
-      socketId: socket.id,
-      participantId: response.selfParticipantId,
-    });
-    socket.join(response.roomId);
-    cb(response);
-    const room = rooms.get(response.roomId);
-    if (room) {
+  });
+
+  socket.on('join_room', async (payload: { roomId: string; pin: string; displayName?: string } | undefined, cb) => {
+    const ack = getSocketAck<[RoomOperationResult<{
+      roomId: string;
+      shareToken: string;
+      state: SyncState;
+      participants: string[];
+      memberProfiles: Array<{ participantId: string; displayName: string }>;
+      selfParticipantId?: string;
+    }>]> (cb);
+    try {
+      const response = await joinRoomForSocket(socket.id, payload ?? { roomId: '', pin: '' }, clientIdentity);
+      if (!response.success) {
+        const room = payload?.roomId ? rooms.get(normalizeRoomId(payload.roomId)) : undefined;
+        writeLog('warn', 'room.join.denied', {
+          socketId: socket.id,
+          roomId: payload?.roomId,
+          reason: room ? 'bad_pin_or_invalid' : 'missing_room',
+        });
+        ack?.(response);
+        return;
+      }
+
+      const room = rooms.get(response.roomId);
+      socket.join(response.roomId);
+
+      if (!room) {
+        writeLog('warn', 'room.join.denied', {
+          socketId: socket.id,
+          roomId: payload?.roomId,
+          reason: 'missing_room_post_join',
+        });
+        ack?.({ success: false, error: 'Room not found' });
+        return;
+      }
+      const currentMember = getRoomMember(room, socket.id);
+      writeLog('info', 'room.joined', {
+        roomId: response.roomId,
+        socketId: socket.id,
+        participantId: currentMember?.participantId,
+        participants: room.memberProfiles.length,
+      });
+      ack?.(response);
       emitRoomPeople(response.roomId, room);
+    } catch (error) {
+      writeLog('error', 'room.join.failed', {
+        socketId: socket.id,
+        roomId: payload?.roomId,
+        message: error instanceof Error ? error.message : String(error),
+      });
+      ack?.({ success: false, error: 'Unable to join room right now' });
     }
   });
 
-  socket.on('join_room', (payload: { roomId: string; pin: string; displayName?: string }, cb) => {
-    const response = joinRoomForSocket(socket.id, payload);
-    if (!response.success) {
-      const room = rooms.get(payload.roomId);
-      writeLog('warn', 'room.join.denied', {
+  socket.on('join_room_link', async (payload: { roomId: string; shareToken: string; displayName?: string } | undefined, cb) => {
+    const ack = getSocketAck<[RoomOperationResult<{
+      roomId: string;
+      shareToken: string;
+      state: SyncState;
+      participants: string[];
+      memberProfiles: Array<{ participantId: string; displayName: string }>;
+      selfParticipantId?: string;
+    }>]> (cb);
+    try {
+      const response = await joinRoomByLinkForSocket(
+        socket.id,
+        payload ?? { roomId: '', shareToken: '' },
+        clientIdentity,
+      );
+      if (!response.success) {
+        writeLog('warn', 'room.link_join.denied', {
+          socketId: socket.id,
+          roomId: payload?.roomId,
+          reason: response.error,
+        });
+        ack?.(response);
+        return;
+      }
+
+      const room = rooms.get(response.roomId);
+      socket.join(response.roomId);
+
+      if (!room) {
+        writeLog('warn', 'room.link_join.denied', {
+          socketId: socket.id,
+          roomId: payload?.roomId,
+          reason: 'missing_room_post_join',
+        });
+        ack?.({ success: false, error: 'Room not found' });
+        return;
+      }
+
+      const currentMember = getRoomMember(room, socket.id);
+      writeLog('info', 'room.link_joined', {
+        roomId: response.roomId,
         socketId: socket.id,
-        roomId: payload.roomId,
-        reason: room ? 'bad_pin_or_invalid' : 'missing_room',
+        participantId: currentMember?.participantId,
+        participants: room.memberProfiles.length,
       });
-      return cb(response);
-    }
-
-    const room = rooms.get(response.roomId);
-    socket.join(response.roomId);
-
-    if (!room) {
-      writeLog('warn', 'room.join.denied', {
-        socketId: socket.id,
-        roomId: payload.roomId,
-        reason: 'missing_room_post_join',
-      });
-      return cb({ success: false, error: 'Room not found' });
-    }
-    const currentMember = getRoomMember(room, socket.id);
-    writeLog('info', 'room.joined', {
-      roomId: response.roomId,
-      socketId: socket.id,
-      participantId: currentMember?.participantId,
-      participants: room.memberProfiles.length,
-    });
-    cb(response);
-    emitRoomPeople(response.roomId, room);
-  });
-
-  socket.on('join_room_link', (payload: { roomId: string; shareToken: string; displayName?: string }, cb) => {
-    const response = joinRoomByLinkForSocket(socket.id, payload);
-    if (!response.success) {
-      writeLog('warn', 'room.link_join.denied', {
+      ack?.(response);
+      emitRoomPeople(response.roomId, room);
+    } catch (error) {
+      writeLog('error', 'room.link_join.failed', {
         socketId: socket.id,
         roomId: payload?.roomId,
-        reason: response.error,
+        message: error instanceof Error ? error.message : String(error),
       });
-      return cb(response);
+      ack?.({ success: false, error: 'Unable to join room right now' });
     }
-
-    const room = rooms.get(response.roomId);
-    socket.join(response.roomId);
-
-    if (!room) {
-      writeLog('warn', 'room.link_join.denied', {
-        socketId: socket.id,
-        roomId: payload?.roomId,
-        reason: 'missing_room_post_join',
-      });
-      return cb({ success: false, error: 'Room not found' });
-    }
-
-    const currentMember = getRoomMember(room, socket.id);
-    writeLog('info', 'room.link_joined', {
-      roomId: response.roomId,
-      socketId: socket.id,
-      participantId: currentMember?.participantId,
-      participants: room.memberProfiles.length,
-    });
-    cb(response);
-    emitRoomPeople(response.roomId, room);
   });
 
   socket.on('sync_state', (roomId: string, update: { position: number; playing: boolean }) => {
@@ -873,6 +1124,11 @@ io.on('connection', (socket) => {
   });
 
   socket.on('force_sync_request', (roomId: string, cb) => {
+    const ack = getSocketAck<[{
+      success?: boolean;
+      error?: string;
+      state?: SyncState;
+    }]>(cb);
     const result = requestSyncStateForSocket(socket.id, roomId);
     if (!result.success) {
       writeLog('warn', 'sync_request.rejected', {
@@ -880,12 +1136,16 @@ io.on('connection', (socket) => {
         roomId,
         reason: result.error,
       });
+      ack?.({ success: false, error: result.error });
       return;
     }
-    cb({ state: result.state });
+    ack?.({ success: true, state: result.state });
   });
 
   socket.on('set_display_name', (roomId: string, nextDisplayName: string, cb) => {
+    const ack = getSocketAck<[RoomOperationResult<{
+      memberProfiles: Array<{ participantId: string; displayName: string }>;
+    }>]> (cb);
     const result = setDisplayNameForSocket(socket.id, roomId, nextDisplayName);
     if (!result.success) {
       writeLog('warn', 'profile.update.rejected', {
@@ -893,7 +1153,7 @@ io.on('connection', (socket) => {
         roomId,
         reason: result.error,
       });
-      cb?.(result);
+      ack?.(result);
       return;
     }
 
@@ -907,10 +1167,13 @@ io.on('connection', (socket) => {
       socketId: socket.id,
       participantId: member?.participantId,
     });
-    cb?.(result);
+    ack?.(result);
   });
 
   socket.on('send_chat_message', (roomId: string, payload: unknown, cb) => {
+    const ack = getSocketAck<[RoomOperationResult<{
+      message: ChatMessage;
+    }>]> (cb);
     const result = sendChatMessageForSocket(socket.id, roomId, payload);
     if (!result.success) {
       writeLog('warn', 'chat.rejected', {
@@ -918,7 +1181,7 @@ io.on('connection', (socket) => {
         roomId,
         reason: result.error,
       });
-      cb?.(result);
+      ack?.(result);
       return;
     }
 
@@ -930,7 +1193,7 @@ io.on('connection', (socket) => {
       textLength: result.message.type === 'text' ? result.message.text?.length : undefined,
       imageSize: result.message.type === 'image' ? result.message.imageDataUrl?.length : undefined,
     });
-    cb?.(result);
+    ack?.(result);
   });
 
   socket.on('disconnect', () => {
@@ -953,11 +1216,12 @@ if (process.env.NODE_ENV === 'production') {
   // `tsx` executes from `server/src`, so resolve the built frontend from the repo root.
   const clientBuildPath = path.resolve(__dirname, '../../client/dist');
   const indexHtmlPath = path.resolve(clientBuildPath, 'index.html');
-  const addNonceToScripts = (html: string, nonce: string) =>
-    html.replaceAll(/<script(\s|>)/g, `<script nonce="${nonce}"$1`);
-  const injectTrustedTypesDefaultPolicy = (html: string, nonce: string) => {
+  const indexHtmlTemplatePromise = readFile(indexHtmlPath, 'utf8');
+  const renderIndexHtml = async (nonce: string) => {
     const bootstrapScript = `<script nonce="${nonce}">(()=>{try{const tt=globalThis.trustedTypes;if(!tt||typeof tt.createPolicy!=='function')return;tt.createPolicy('default',{createHTML:(input)=>input,createScript:(input)=>input,createScriptURL:(input)=>input});}catch{}})();</script>`;
-    return html.replace('<head>', `<head>${bootstrapScript}`);
+    const html = await indexHtmlTemplatePromise;
+    const htmlWithNonce = addNonceToScriptTags(html, nonce);
+    return injectHtmlIntoHead(htmlWithNonce, bootstrapScript);
   };
 
   app.get('/index.html', (_req, res) => {
@@ -980,10 +1244,8 @@ if (process.env.NODE_ENV === 'production') {
     // Always serve a fresh shell so clients receive the latest asset manifest.
     res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
     try {
-      const html = await readFile(indexHtmlPath, 'utf8');
       const nonce = String(res.locals.cspNonce ?? '');
-      const htmlWithNonce = addNonceToScripts(html, nonce);
-      res.send(injectTrustedTypesDefaultPolicy(htmlWithNonce, nonce));
+      res.send(await renderIndexHtml(nonce));
     } catch (error) {
       next(error);
     }

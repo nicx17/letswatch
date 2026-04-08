@@ -224,6 +224,14 @@ const showSubtitleTrack = (
   }
 };
 
+const EMPTY_SUBTITLE_TRACK_SRC = 'data:text/vtt;charset=utf-8,WEBVTT%0A%0A';
+const isTrustedBlobUrl = (value: string | null): value is string =>
+  typeof value === 'string' && value.startsWith('blob:');
+const getTrustedVideoSrc = (value: string | null): string | undefined => (isTrustedBlobUrl(value) ? value : undefined);
+const getTrustedSubtitleSrc = (value: string | null): string => (
+  isTrustedBlobUrl(value) ? value : EMPTY_SUBTITLE_TRACK_SRC
+);
+
 const MAX_CHAT_IMAGE_DIMENSION = 1600;
 const MAX_CHAT_IMAGE_FILE_SIZE = 4 * 1024 * 1024;
 const MAX_CHAT_IMAGE_DATA_URL_LENGTH = 1_700_000;
@@ -367,6 +375,7 @@ function App() { // NOSONAR
   const ignoreEvents = useRef({ play: false, pause: false, seek: false });
   const objectUrlRef = useRef<string | null>(null);
   const subtitleUrlRef = useRef<string | null>(null);
+  const latestRoomStateRef = useRef<SyncState | null>(null);
 
   useEffect(() => {
     document.documentElement.dataset.theme = theme;
@@ -526,13 +535,86 @@ function App() { // NOSONAR
     }
   };
 
+  const normalizeIncomingState = (state: SyncState): SyncState => ({
+    position: state.position,
+    playing: state.playing,
+    // Treat the received snapshot as authoritative "now" on the local client.
+    updatedAt: Date.now(),
+  });
+
+  const canApplyVideoState = () => {
+    const videoElement = videoRef.current;
+    return Boolean(videoElement && videoElement.readyState >= 1);
+  };
+
+  const cacheRoomState = (state: SyncState) => {
+    const normalizedState = normalizeIncomingState(state);
+    latestRoomStateRef.current = normalizedState;
+    return normalizedState;
+  };
+
+  const applyAuthoritativeState = (state: SyncState) => {
+    const normalizedState = cacheRoomState(state);
+    if (canApplyVideoState()) {
+      applyState(normalizedState);
+    }
+
+    return normalizedState;
+  };
+
+  const clearShareUrl = () => {
+    const browserWindow = globalThis.window;
+    if (!browserWindow) return;
+
+    const url = new URL(browserWindow.location.href);
+    url.searchParams.delete('room');
+    url.searchParams.delete('token');
+    browserWindow.history.replaceState({}, '', url.toString());
+  };
+
+  const resetJoinedRoomState = (clearSharedLink: boolean) => {
+    latestRoomStateRef.current = null;
+    setIsJoined(false);
+    setJoinMode(null);
+    setParticipantsCount(0);
+    setMemberProfiles([]);
+    setCurrentParticipantId('');
+    setChatMessages([]);
+    setUnreadMessages(0);
+    setDrift(0);
+
+    if (clearSharedLink) {
+      setSharedRoomId('');
+      setShareToken('');
+      clearShareUrl();
+    }
+  };
+
+  const handleReconnectFailure = (response: SyncResponse, clearSharedLink: boolean) => {
+    resetJoinedRoomState(clearSharedLink);
+    clientLog('warn', 'room.reconnect.failed', {
+      roomId,
+      joinMode: joinMode ?? 'unknown',
+      error: response.error,
+    });
+    alert(response.error || 'Unable to reconnect to the room');
+  };
+
+  const handleVideoLoadedMetadata = () => {
+    showSubtitleTrack(videoRef.current, Boolean(subtitleSrc), subtitleLabel);
+
+    if (latestRoomStateRef.current) {
+      applyState(latestRoomStateRef.current);
+    }
+  };
+
   const handleManualSync = () => {
     const socket = socketRef.current;
     if (!socket || !videoRef.current) return;
 
     socket.emit('force_sync_request', roomId, (response: SyncResponse) => {
-      if (response?.state) {
-        applyState(response.state);
+      if (response?.success && response.state) {
+        applyAuthoritativeState(response.state);
       }
     });
   };
@@ -547,7 +629,7 @@ function App() { // NOSONAR
     }
 
     if (response.state) {
-      applyState(response.state);
+      applyAuthoritativeState(response.state);
     }
 
     return true;
@@ -589,6 +671,7 @@ function App() { // NOSONAR
 
       setSharedRoomId('');
       setShareToken('');
+      clearShareUrl();
       clientLog('warn', 'room.link_join.failed', { roomId: normalizedRoomId, error: response.error });
       alert(response.error || 'Failed to join shared room');
     });
@@ -601,19 +684,23 @@ function App() { // NOSONAR
     if (joinMode === 'link') {
       if (!shareToken) return;
       socket.emit('join_room_link', { roomId, shareToken, displayName }, (response: SyncResponse) => {
-        syncFromRoomResponse(response);
+        if (!syncFromRoomResponse(response)) {
+          handleReconnectFailure(response, true);
+        }
       });
       return;
     }
 
     if (!roomPin) return;
     socket.emit('join_room', { roomId, pin: roomPin, displayName }, (response: SyncResponse) => {
-      syncFromRoomResponse(response);
+      if (!syncFromRoomResponse(response)) {
+        handleReconnectFailure(response, false);
+      }
     });
   });
 
   const handleStateUpdated = useEffectEvent((state: SyncState) => {
-    applyState(state);
+    applyAuthoritativeState(state);
   });
 
   const handleParticipantsUpdated = useEffectEvent((participantList: string[]) => {
@@ -791,13 +878,19 @@ function App() { // NOSONAR
       if (!socket) return;
 
       socket.emit('force_sync_request', roomId, (response: SyncResponse) => {
-        if (!videoRef.current || !response?.state?.playing) return;
+        if (!videoRef.current || !response?.success || !response.state) return;
 
-        const currentDrift = syncController.calculateDrift(videoRef.current.currentTime, response.state);
+        const normalizedState: SyncState = {
+          position: response.state.position,
+          playing: response.state.playing,
+          updatedAt: Date.now(),
+        };
+        latestRoomStateRef.current = normalizedState;
+        const currentDrift = syncController.calculateDrift(videoRef.current.currentTime, normalizedState);
         setDrift(currentDrift);
 
-        if (currentDrift > 2) {
-          handleDriftCorrection(response.state);
+        if (syncController.shouldForceSync(currentDrift)) {
+          handleDriftCorrection(normalizedState);
         }
       });
     }, 3000);
@@ -980,6 +1073,8 @@ function App() { // NOSONAR
   const shouldShowUploadState = !videoSrc;
   const isChatExpanded = isChatCollapsed === false;
   const isEmojiStripOpen = isEmojiStripCollapsed === false;
+  const trustedVideoSrc = getTrustedVideoSrc(videoSrc);
+  const trustedSubtitleSrc = getTrustedSubtitleSrc(subtitleSrc);
 
   const getDriftColor = () => {
     if (drift < 0.5) return 'text-emerald-400';
@@ -1182,17 +1277,17 @@ function App() { // NOSONAR
                     <div className="video-frame">
                       <video
                         ref={videoRef}
-                        src={videoSrc}
+                        src={trustedVideoSrc}
                         controls
                         className={`w-full aspect-video rounded-[28px] outline-none ${isTheaterMode ? 'theater-video' : ''}`}
-                        onLoadedMetadata={() => showSubtitleTrack(videoRef.current, Boolean(subtitleSrc), subtitleLabel)}
+                        onLoadedMetadata={handleVideoLoadedMetadata}
                         onPlay={handlePlay}
                         onPause={handlePause}
                         onSeeked={handleSeeked}
                       >
                         <track
                           key={subtitleSrc ?? 'empty-caption-track'}
-                          src={subtitleSrc ?? 'data:text/vtt;charset=utf-8,WEBVTT%0A%0A'}
+                          src={trustedSubtitleSrc}
                           kind="captions"
                           srcLang="en"
                           label={subtitleLabel ?? 'Uploaded subtitles'}
