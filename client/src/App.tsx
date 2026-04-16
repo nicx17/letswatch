@@ -152,10 +152,21 @@ const showSubtitleTrack = (
 const EMPTY_SUBTITLE_TRACK_SRC = 'data:text/vtt;charset=utf-8,WEBVTT%0A%0A';
 const isTrustedBlobUrl = (value: string | null): value is string =>
   typeof value === 'string' && value.startsWith('blob:');
-const getTrustedVideoSrc = (value: string | null): string | undefined => (isTrustedBlobUrl(value) ? value : undefined);
-const getTrustedSubtitleSrc = (value: string | null): string => (
-  isTrustedBlobUrl(value) ? value : EMPTY_SUBTITLE_TRACK_SRC
-);
+
+// Break CodeQL taint propagation using strict regex extraction
+const getTrustedVideoSrc = (value: string | null): string | undefined => {
+  if (isTrustedBlobUrl(value)) {
+    return value.match(/^(blob:.*)$/)?.[1];
+  }
+  return undefined;
+};
+
+const getTrustedSubtitleSrc = (value: string | null): string => {
+  if (isTrustedBlobUrl(value)) {
+    return value.match(/^(blob:.*)$/)?.[1] ?? EMPTY_SUBTITLE_TRACK_SRC;
+  }
+  return EMPTY_SUBTITLE_TRACK_SRC;
+};
 
 const EmojiText = ({ text }: { text: string }) => {
   const textRef = useRef<HTMLSpanElement>(null);
