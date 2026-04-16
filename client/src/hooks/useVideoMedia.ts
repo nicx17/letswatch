@@ -58,6 +58,11 @@ export function useVideoMedia(
 
   const convertSrtToVtt = (srtText: string): string => {
     const vttBody = srtText
+      // Prevent XSS through WebVTT HTML rendering by escaping meta-characters
+      .replaceAll('&', '&amp;')
+      .replaceAll('<', '&lt;')
+      .replaceAll('>', '&gt;')
+      // Standard SRT to VTT formatting
       .replaceAll('\r\n', '\n')
       .replaceAll('\r', '\n')
       .replaceAll(/^\d+\n/gm, '')
