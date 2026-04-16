@@ -23,3 +23,4 @@ problems_sonarqube.json
 chrome_issues.txt
 lighthouse.md
 severe_bugs.md
+client/src/App.tsx.backup

@@ -157,6 +157,7 @@ body,
 }
 
 html {
+    scroll-behavior: smooth;
     background:
         radial-gradient(circle at top left, var(--orb-a) 0, transparent 36%),
         radial-gradient(circle at top right, var(--orb-b) 0, transparent 32%),
