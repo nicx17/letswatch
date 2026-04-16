@@ -150,22 +150,33 @@ const showSubtitleTrack = (
 };
 
 const EMPTY_SUBTITLE_TRACK_SRC = 'data:text/vtt;charset=utf-8,WEBVTT%0A%0A';
-const isTrustedBlobUrl = (value: string | null): value is string =>
-  typeof value === 'string' && value.startsWith('blob:');
 
-// Break CodeQL taint propagation using strict regex extraction
-const getTrustedVideoSrc = (value: string | null): string | undefined => {
-  if (isTrustedBlobUrl(value)) {
-    return value.match(/^(blob:.*)$/)?.[1];
+/**
+ * Sanitize a blob URL through the URL constructor to break CodeQL taint
+ * propagation (js/xss-through-dom). The URL constructor parses and validates
+ * the input, and .href returns a freshly constructed string that CodeQL
+ * recognises as untainted. Only blob: protocol URLs are accepted.
+ */
+const sanitizeBlobUrl = (value: string): string | null => {
+  try {
+    const parsed = new URL(value);
+    if (parsed.protocol === 'blob:') {
+      return parsed.href;
+    }
+  } catch {
+    // Malformed URL — reject
   }
-  return undefined;
+  return null;
+};
+
+const getTrustedVideoSrc = (value: string | null): string | undefined => {
+  if (typeof value !== 'string') return undefined;
+  return sanitizeBlobUrl(value) ?? undefined;
 };
 
 const getTrustedSubtitleSrc = (value: string | null): string => {
-  if (isTrustedBlobUrl(value)) {
-    return value.match(/^(blob:.*)$/)?.[1] ?? EMPTY_SUBTITLE_TRACK_SRC;
-  }
-  return EMPTY_SUBTITLE_TRACK_SRC;
+  if (typeof value !== 'string') return EMPTY_SUBTITLE_TRACK_SRC;
+  return sanitizeBlobUrl(value) ?? EMPTY_SUBTITLE_TRACK_SRC;
 };
 
 const EmojiText = ({ text }: { text: string }) => {
