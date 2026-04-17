@@ -36,6 +36,11 @@ interface ChatMessage {
   sentAt: number;
 }
 
+const ACTIVE_SHARE_LINK_STORAGE_KEY = 'letswatch-active-share-link';
+const MAX_CHAT_IMAGE_FILE_SIZE = 2 * 1024 * 1024;
+const MAX_CHAT_IMAGE_UPLOAD_BYTES = 850 * 1024;
+const MAX_CHAT_IMAGE_DIMENSION = 1280;
+
 const getDefaultSocketUrl = () => {
   const browserWindow = globalThis.window;
   if (!browserWindow) {
@@ -48,6 +53,91 @@ const getDefaultSocketUrl = () => {
 };
 
 const SOCKET_URL = import.meta.env.VITE_SOCKET_URL || getDefaultSocketUrl();
+
+const getApproximateDataUrlSizeBytes = (dataUrl: string) => {
+  const base64Payload = dataUrl.split(',')[1] ?? '';
+  return Math.ceil((base64Payload.length * 3) / 4);
+};
+
+const persistShareLinkSession = (roomId: string, shareToken: string) => {
+  globalThis.window?.sessionStorage.setItem(
+    ACTIVE_SHARE_LINK_STORAGE_KEY,
+    JSON.stringify({ roomId, shareToken }),
+  );
+};
+
+const clearShareLinkSession = () => {
+  globalThis.window?.sessionStorage.removeItem(ACTIVE_SHARE_LINK_STORAGE_KEY);
+};
+
+const readFileAsDataUrl = (file: File) =>
+  new Promise<string>((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      if (typeof reader.result === 'string') {
+        resolve(reader.result);
+        return;
+      }
+
+      reject(new Error('Unable to read image'));
+    };
+    reader.onerror = () => reject(reader.error ?? new Error('Unable to read image'));
+    reader.readAsDataURL(file);
+  });
+
+const loadImageElement = (dataUrl: string) =>
+  new Promise<HTMLImageElement>((resolve, reject) => {
+    const image = new Image();
+    image.onload = () => resolve(image);
+    image.onerror = () => reject(new Error('Unable to decode image'));
+    image.src = dataUrl;
+  });
+
+const compressChatImage = async (file: File) => {
+  if (file.type === 'image/gif') {
+    const originalDataUrl = await readFileAsDataUrl(file);
+    if (getApproximateDataUrlSizeBytes(originalDataUrl) > MAX_CHAT_IMAGE_UPLOAD_BYTES) {
+      throw new Error('GIFs must stay under 850KB. Try a smaller GIF or a static image.');
+    }
+    return originalDataUrl;
+  }
+
+  const sourceDataUrl = await readFileAsDataUrl(file);
+  const sourceImage = await loadImageElement(sourceDataUrl);
+  const longestEdge = Math.max(sourceImage.naturalWidth, sourceImage.naturalHeight, 1);
+  let scale = Math.min(1, MAX_CHAT_IMAGE_DIMENSION / longestEdge);
+  let bestResult = sourceDataUrl;
+
+  while (scale >= 0.4) {
+    const canvas = document.createElement('canvas');
+    canvas.width = Math.max(1, Math.round(sourceImage.naturalWidth * scale));
+    canvas.height = Math.max(1, Math.round(sourceImage.naturalHeight * scale));
+
+    const context = canvas.getContext('2d');
+    if (!context) {
+      throw new Error('Unable to prepare image');
+    }
+
+    context.drawImage(sourceImage, 0, 0, canvas.width, canvas.height);
+
+    for (const quality of [0.84, 0.74, 0.64, 0.54]) {
+      const candidate = canvas.toDataURL('image/webp', quality);
+      bestResult = candidate;
+
+      if (getApproximateDataUrlSizeBytes(candidate) <= MAX_CHAT_IMAGE_UPLOAD_BYTES) {
+        return candidate;
+      }
+    }
+
+    scale *= 0.82;
+  }
+
+  if (getApproximateDataUrlSizeBytes(bestResult) > MAX_CHAT_IMAGE_UPLOAD_BYTES) {
+    throw new Error('Image is still too large after compression. Try a smaller image.');
+  }
+
+  return bestResult;
+};
 
 interface UseRoomSocketOptions {
   roomId: string;
@@ -108,12 +198,16 @@ export function useRoomSocket(options: UseRoomSocketOptions) {
     browserWindow.history.replaceState({}, '', url.toString());
   };
 
-  const updateShareUrl = (nextRoomId: string, nextShareToken: string) => {
+  const updateShareUrl = (nextRoomId: string, nextShareToken?: string) => {
     const browserWindow = globalThis.window;
     if (!browserWindow) return;
     const url = new URL(browserWindow.location.href);
     url.searchParams.set('room', nextRoomId);
-    url.searchParams.set('token', nextShareToken);
+    if (nextShareToken) {
+      url.searchParams.set('token', nextShareToken);
+    } else {
+      url.searchParams.delete('token');
+    }
     browserWindow.history.replaceState({}, '', url.toString());
   };
 
@@ -147,6 +241,7 @@ export function useRoomSocket(options: UseRoomSocketOptions) {
     if (clearSharedLink && joinMode === 'link') {
       setSharedRoomId('');
       setShareToken('');
+      clearShareLinkSession();
       clearShareUrl();
     }
   };
@@ -179,17 +274,19 @@ export function useRoomSocket(options: UseRoomSocketOptions) {
     clientLog('info', 'room.link_join.requested', { roomId: normalizedRoomId });
     socket.emit('join_room_link', { roomId: normalizedRoomId, shareToken, displayName }, (response: SyncResponse) => {
       if (syncFromRoomResponse(response)) {
+        const resolvedRoomId = (response.roomId ?? normalizedRoomId).toUpperCase();
         setChatMessages([]);
-        setRoomId((response.roomId ?? normalizedRoomId).toUpperCase());
+        setRoomId(resolvedRoomId);
         setRoomPin('');
         setJoinMode('link');
         setIsJoined(true);
-        setSharedRoomId((response.roomId ?? normalizedRoomId).toUpperCase());
+        setSharedRoomId(resolvedRoomId);
         if (response.shareToken) {
-          updateShareUrl((response.roomId ?? normalizedRoomId).toUpperCase(), response.shareToken);
+          persistShareLinkSession(resolvedRoomId, response.shareToken);
         }
+        updateShareUrl(resolvedRoomId);
         clientLog('info', 'room.link_join.succeeded', {
-          roomId: response.roomId ?? normalizedRoomId,
+          roomId: resolvedRoomId,
           selfParticipantId: response.selfParticipantId,
         });
         return;
@@ -197,6 +294,7 @@ export function useRoomSocket(options: UseRoomSocketOptions) {
 
       setSharedRoomId('');
       setShareToken('');
+      clearShareLinkSession();
       clearShareUrl();
       clientLog('warn', 'room.link_join.failed', { roomId: normalizedRoomId, error: response.error });
       alert(response.error || 'Failed to join shared room');
@@ -327,16 +425,16 @@ export function useRoomSocket(options: UseRoomSocketOptions) {
     clientLog('info', 'room.create.requested', { roomId: normalizedRoomId, displayName: displayName || undefined });
     socket.emit('create_room', { roomId: normalizedRoomId, pin: normalizedPin, displayName }, (response: SyncResponse) => {
       if (syncFromRoomResponse(response)) {
+        const resolvedRoomId = (response.roomId ?? normalizedRoomId).toUpperCase();
         setChatMessages([]);
-        setRoomId((response.roomId ?? normalizedRoomId).toUpperCase());
+        setRoomId(resolvedRoomId);
         setRoomPin(response.pin ?? normalizedPin);
         setJoinMode('pin');
-        setSharedRoomId((response.roomId ?? normalizedRoomId).toUpperCase());
+        setSharedRoomId(resolvedRoomId);
         setIsJoined(true);
-        if (response.shareToken) {
-          updateShareUrl((response.roomId ?? normalizedRoomId).toUpperCase(), response.shareToken);
-        }
-        clientLog('info', 'room.create.succeeded', { roomId: response.roomId ?? normalizedRoomId, selfParticipantId: response.selfParticipantId });
+        clearShareLinkSession();
+        updateShareUrl(resolvedRoomId);
+        clientLog('info', 'room.create.succeeded', { roomId: resolvedRoomId, selfParticipantId: response.selfParticipantId });
       } else {
         clientLog('warn', 'room.create.failed', { error: response.error });
         alert(response.error || 'Failed to create room');
@@ -355,15 +453,15 @@ export function useRoomSocket(options: UseRoomSocketOptions) {
     clientLog('info', 'room.join.requested', { roomId: normalizedRoomId });
     socket.emit('join_room', { roomId: normalizedRoomId, pin: normalizedPin, displayName }, (response: SyncResponse) => {
       if (syncFromRoomResponse(response)) {
+        const resolvedRoomId = (response.roomId ?? normalizedRoomId).toUpperCase();
         setChatMessages([]);
-        setRoomId((response.roomId ?? normalizedRoomId).toUpperCase());
+        setRoomId(resolvedRoomId);
         setJoinMode('pin');
-        setSharedRoomId((response.roomId ?? normalizedRoomId).toUpperCase());
+        setSharedRoomId(resolvedRoomId);
         setIsJoined(true);
-        if (response.shareToken) {
-          updateShareUrl((response.roomId ?? normalizedRoomId).toUpperCase(), response.shareToken);
-        }
-        clientLog('info', 'room.join.succeeded', { roomId: response.roomId ?? normalizedRoomId, selfParticipantId: response.selfParticipantId });
+        clearShareLinkSession();
+        updateShareUrl(resolvedRoomId);
+        clientLog('info', 'room.join.succeeded', { roomId: resolvedRoomId, selfParticipantId: response.selfParticipantId });
       } else {
         clientLog('warn', 'room.join.failed', { roomId: normalizedRoomId, error: response.error });
         alert(response.error || 'Failed to join room');
@@ -469,27 +567,31 @@ export function useRoomSocket(options: UseRoomSocketOptions) {
     const socket = socketRef.current;
     if (!file || !socket || !isJoined) return;
 
-    if (file.size > 2 * 1024 * 1024) {
+    if (file.size > MAX_CHAT_IMAGE_FILE_SIZE) {
       alert('Image is too large. Must be under 2MB.');
       e.target.value = '';
       return;
     }
 
-    const reader = new FileReader();
-    reader.onload = (event) => {
-      const dataUrl = event.target?.result;
-      if (typeof dataUrl !== 'string') return;
-
+    compressChatImage(file)
+      .then((dataUrl) => {
       socket.emit('send_chat_message', roomId, { type: 'image', imageDataUrl: dataUrl }, (response: SyncResponse) => {
         if (!response.success) {
           clientLog('warn', 'chat.image_failed', { roomId, error: response.error });
           alert(response.error || 'Unable to send image');
           return;
         }
-        clientLog('info', 'chat.image_sent', { roomId });
+        clientLog('info', 'chat.image_sent', {
+          roomId,
+          approxBytes: getApproximateDataUrlSizeBytes(dataUrl),
+        });
       });
-    };
-    reader.readAsDataURL(file);
+      })
+      .catch((error: unknown) => {
+        const message = error instanceof Error ? error.message : 'Unable to prepare image';
+        clientLog('warn', 'chat.image_prepare_failed', { roomId, error: message });
+        alert(message);
+      });
     e.target.value = '';
   };
 

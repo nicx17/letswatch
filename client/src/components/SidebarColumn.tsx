@@ -86,26 +86,17 @@ export function SidebarColumn({
           </div>
         </div>
 
-        <div className="mt-7 space-y-5">
-          <div>
+        <div className="session-stat-grid mt-7">
+          <div className="session-stat-card">
             <p className="block text-[11px] font-semibold uppercase tracking-[0.24em] text-[var(--text-muted)]">
               Room code
             </p>
             <div className="mt-2 rounded-[20px] border border-[var(--border-color)] bg-[var(--panel-quiet)] px-4 py-4 text-center font-mono text-lg font-semibold tracking-[0.08em] text-[var(--text-main)]">
               {roomId}
             </div>
-            <div className="mt-3 flex flex-wrap items-center gap-3">
-              <button type="button" onClick={handleCopyRoomLink} className="secondary-button">
-                {roomLinkCopied ? <Check size={16} /> : <Copy size={16} />}
-                <span>{roomLinkCopied ? 'Copied Link' : 'Copy Room Link'}</span>
-              </button>
-              <span className="text-xs text-[var(--text-muted)]">
-                Anyone opening the link joins this room right away.
-              </span>
-            </div>
           </div>
 
-          <div>
+          <div className="session-stat-card">
             <p className="block text-[11px] font-semibold uppercase tracking-[0.24em] text-[var(--text-muted)]">
               Room PIN
             </p>
@@ -113,8 +104,25 @@ export function SidebarColumn({
               {roomPin}
             </div>
           </div>
+        </div>
 
-          <div>
+        <div className="session-link-card mt-5">
+          <div className="min-w-0">
+            <p className="text-[11px] font-semibold uppercase tracking-[0.24em] text-[var(--text-muted)]">
+              Invite link
+            </p>
+            <p className="mt-2 text-sm leading-6 text-[var(--text-muted)]">
+              Share a one-tap room link with anyone joining from their device.
+            </p>
+          </div>
+          <button type="button" onClick={handleCopyRoomLink} className="secondary-button">
+            {roomLinkCopied ? <Check size={16} /> : <Copy size={16} />}
+            <span>{roomLinkCopied ? 'Copied Link' : 'Copy Link'}</span>
+          </button>
+        </div>
+
+        <div className="mt-5 space-y-5">
+          <div className="session-card-block">
             <p className="block text-[11px] font-semibold uppercase tracking-[0.24em] text-[var(--text-muted)]">
               Current video
             </p>
@@ -142,7 +150,7 @@ export function SidebarColumn({
             </div>
           </div>
 
-          <div>
+          <div className="session-card-block">
             <label htmlFor="sidebar-display-name" className="block text-[11px] font-semibold uppercase tracking-[0.24em] text-[var(--text-muted)]">
               Your name
             </label>
@@ -228,19 +236,6 @@ export function SidebarColumn({
                 <span className="text-sm text-[var(--text-muted)]">Waiting for someone else to join.</span>
               )}
             </div>
-          </div>
-
-          <div className="feature-row">
-            <span className="feature-dot" />
-            <span>Low-latency room sync across connected viewers</span>
-          </div>
-          <div className="feature-row">
-            <span className="feature-dot" />
-            <span>Video stays local for full-resolution playback</span>
-          </div>
-          <div className="feature-row">
-            <span className="feature-dot" />
-            <span>Theme-aware layout with ambient gradients and glass panels</span>
           </div>
         </div>
       </div>

@@ -9,6 +9,7 @@ import { useRoomSocket } from './hooks/useRoomSocket';
 import type { SyncState } from './types';
 
 type JoinMode = 'pin' | 'link' | null;
+const ACTIVE_SHARE_LINK_STORAGE_KEY = 'letswatch-active-share-link';
 const TOP_CHAT_EMOJIS = [
   '😂', '😭', '😍', '🔥', '👏', '😮', '🥹', '❤️', '🤣', '😊',
   '👀', '😏', '😜', '😈', '💋', '👄', '👅', '💦', '🥵', '😫',
@@ -122,10 +123,60 @@ const getInitialSharedRoomId = () => {
   return new URLSearchParams(browserWindow.location.search).get('room')?.trim().toUpperCase() ?? '';
 };
 
+const getPersistedShareLink = () => {
+  const browserWindow = globalThis.window;
+  if (!browserWindow) return null;
+
+  const rawValue = browserWindow.sessionStorage.getItem(ACTIVE_SHARE_LINK_STORAGE_KEY);
+  if (!rawValue) return null;
+
+  try {
+    const parsed = JSON.parse(rawValue) as { roomId?: string; shareToken?: string };
+    if (typeof parsed.roomId === 'string' && typeof parsed.shareToken === 'string') {
+      return {
+        roomId: parsed.roomId.trim().toUpperCase(),
+        shareToken: parsed.shareToken.trim(),
+      };
+    }
+  } catch {
+    browserWindow.sessionStorage.removeItem(ACTIVE_SHARE_LINK_STORAGE_KEY);
+  }
+
+  return null;
+};
+
 const getInitialSharedRoomToken = () => {
   const browserWindow = globalThis.window;
   if (!browserWindow) return '';
-  return new URLSearchParams(browserWindow.location.search).get('token')?.trim() ?? '';
+
+  const params = new URLSearchParams(browserWindow.location.search);
+  const tokenFromUrl = params.get('token')?.trim();
+  if (tokenFromUrl) {
+    return tokenFromUrl;
+  }
+
+  const roomId = params.get('room')?.trim().toUpperCase();
+  const persistedLink = getPersistedShareLink();
+  if (roomId && persistedLink?.roomId === roomId) {
+    return persistedLink.shareToken;
+  }
+
+  return '';
+};
+
+const getScrollBehavior = (): ScrollBehavior => {
+  const browserWindow = globalThis.window;
+  if (!browserWindow) return 'auto';
+
+  return browserWindow.matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth';
+};
+
+const scrollToElement = (
+  element: HTMLElement | null,
+  block: ScrollLogicalPosition = 'start',
+) => {
+  if (!element) return;
+  element.scrollIntoView({ behavior: getScrollBehavior(), block });
 };
 
 const showSubtitleTrack = (
@@ -214,6 +265,8 @@ function App() {
   const videoRef = useRef<HTMLVideoElement>(null);
   const chatScrollRef = useRef<HTMLDivElement>(null);
   const copyResetTimeoutRef = useRef<number | null>(null);
+  const joinScreenRef = useRef<HTMLDivElement>(null);
+  const watchSectionRef = useRef<HTMLElement>(null);
   // Shared ref: useVideoMedia needs to read the last known server state;
   // we own it here and pass it to both hooks.
   const latestRoomStateRef = useRef<SyncState | null>(null);
@@ -299,6 +352,12 @@ function App() {
     clientLog,
   });
 
+  // ── Derived ───────────────────────────────────────────────────────────────
+  const showJoinScreen = !isJoined;
+  const shouldShowUploadState = !videoSrc;
+  const trustedVideoSrc = getTrustedVideoSrc(videoSrc);
+  const trustedSubtitleSrc = getTrustedSubtitleSrc(subtitleSrc);
+
   // Keep our shared ref in sync with what the socket hook reports
   useEffect(() => {
     latestRoomStateRef.current = socketLatestRoomStateRef.current;
@@ -307,8 +366,29 @@ function App() {
   // ── Scroll chat to bottom on new messages ─────────────────────────────────
   useEffect(() => {
     if (!chatScrollRef.current) return;
+
+    if (typeof chatScrollRef.current.scrollTo === 'function') {
+      chatScrollRef.current.scrollTo({
+        top: chatScrollRef.current.scrollHeight,
+        behavior: getScrollBehavior(),
+      });
+      return;
+    }
+
     chatScrollRef.current.scrollTop = chatScrollRef.current.scrollHeight;
   }, [chatMessages, isChatCollapsed]);
+
+  useEffect(() => {
+    if (showJoinScreen) {
+      return;
+    }
+
+    const id = globalThis.setTimeout(() => {
+      scrollToElement(watchSectionRef.current, 'start');
+    }, 120);
+
+    return () => globalThis.clearTimeout(id);
+  }, [showJoinScreen]);
 
   // ── Sync subtitle track display after src changes ─────────────────────────
   useEffect(() => {
@@ -356,12 +436,6 @@ function App() {
     setIsTheaterMode((current) => !current);
   };
 
-  // ── Derived ───────────────────────────────────────────────────────────────
-  const showJoinScreen = !isJoined;
-  const shouldShowUploadState = !videoSrc;
-  const trustedVideoSrc = getTrustedVideoSrc(videoSrc);
-  const trustedSubtitleSrc = getTrustedSubtitleSrc(subtitleSrc);
-
   const getDriftColor = () => {
     if (drift < 0.5) return 'text-emerald-400';
     if (drift < 2) return 'text-amber-300';
@@ -383,7 +457,7 @@ function App() {
       <div className="ambient-orb ambient-orb-two" aria-hidden="true" />
       <div className="ambient-grid" aria-hidden="true" />
 
-      <header className={`page-chrome mx-auto mb-10 w-full max-w-[1480px] px-6 pt-8 sm:px-8 lg:px-12 ${isTheaterMode ? 'page-chrome-hidden' : ''}`}>
+      <header className={`page-chrome mx-auto mb-8 w-full max-w-[1600px] px-4 pt-5 sm:px-6 sm:pt-6 lg:px-10 lg:pt-8 ${isTheaterMode ? 'page-chrome-hidden' : ''}`}>
         <div className="chrome-panel flex flex-col gap-6 rounded-[32px] px-6 py-6 sm:px-8 lg:flex-row lg:items-center lg:justify-between">
           <div className="flex items-start gap-4">
             <div className="brand-mark">
@@ -405,6 +479,22 @@ function App() {
 
           <div className="theme-rail">
             <p className="theme-rail-label">Choose the room mood</p>
+            <div className="hero-actions">
+              <button
+                type="button"
+                className="primary-button"
+                onClick={() => scrollToElement(showJoinScreen ? joinScreenRef.current : watchSectionRef.current)}
+              >
+                {showJoinScreen ? 'Start Your Room' : 'Jump to Player'}
+              </button>
+              <button
+                type="button"
+                className="secondary-button"
+                onClick={() => globalThis.window?.scrollTo({ top: 0, behavior: getScrollBehavior() })}
+              >
+                Browse Themes
+              </button>
+            </div>
             <div className="flex flex-wrap gap-2">
               {THEME_OPTIONS.map((option) => (
                 <button
@@ -423,20 +513,25 @@ function App() {
         </div>
       </header>
 
-      <main className={`main-shell mx-auto flex w-full max-w-[1480px] flex-1 flex-col px-6 pb-10 sm:px-8 lg:px-12 ${isTheaterMode ? 'main-shell-theater' : ''}`}>
+      <main className={`main-shell mx-auto flex w-full max-w-[1600px] flex-1 flex-col px-4 pb-8 sm:px-6 sm:pb-10 lg:px-10 ${isTheaterMode ? 'main-shell-theater' : ''}`}>
         {showJoinScreen ? (
-          <JoinScreen
-            displayName={displayName}
-            setDisplayName={setDisplayName}
-            roomId={roomId}
-            setRoomId={setRoomId}
-            roomPin={roomPin}
-            setRoomPin={setRoomPin}
-            handleCreateRoom={handleCreateRoom}
-            handleJoin={handleJoin}
-          />
+          <div ref={joinScreenRef}>
+            <JoinScreen
+              displayName={displayName}
+              setDisplayName={setDisplayName}
+              roomId={roomId}
+              setRoomId={setRoomId}
+              roomPin={roomPin}
+              setRoomPin={setRoomPin}
+              handleCreateRoom={handleCreateRoom}
+              handleJoin={handleJoin}
+            />
+          </div>
         ) : (
-          <section className={`watch-section flex flex-1 flex-col gap-8 ${isTheaterMode ? 'watch-section-theater' : ''}`}>
+          <section
+            ref={watchSectionRef}
+            className={`watch-section flex flex-1 flex-col gap-8 ${isTheaterMode ? 'watch-section-theater' : ''}`}
+          >
             {shouldShowUploadState ? (
               <div className="chrome-panel panel-upload flex min-h-[62vh] flex-col items-center justify-center rounded-[36px] border border-dashed border-[var(--border-color)] px-8 py-12 text-center">
                 <div className="upload-icon-shell">
@@ -520,7 +615,7 @@ function App() {
         )}
       </main>
 
-      <footer className={`page-chrome mx-auto mt-auto w-full max-w-[1480px] px-6 pb-6 text-center text-sm text-[var(--text-muted)] sm:px-8 lg:px-12 ${isTheaterMode ? 'page-chrome-hidden' : ''}`}>
+      <footer className={`page-chrome mx-auto mt-auto w-full max-w-[1600px] px-4 pb-4 text-center text-sm text-[var(--text-muted)] sm:px-6 sm:pb-6 lg:px-10 ${isTheaterMode ? 'page-chrome-hidden' : ''}`}>
         <div className="chrome-panel flex flex-col items-center justify-between gap-2 rounded-[26px] px-5 py-4 sm:flex-row">
           <p className="text-xs uppercase tracking-[0.26em] text-[var(--text-soft)]">&copy; 2026 nickcardoso</p>
           <a

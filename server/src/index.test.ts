@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   addNonceToScriptTags,
   applySyncStateForSocket,
@@ -13,11 +13,16 @@ import {
   resetRuntimeState,
   rooms,
   sendChatMessageForSocket,
+  setDisplayNameForSocket,
 } from './index.js';
 
 describe('Server Room Logic', () => {
   beforeEach(() => {
     resetRuntimeState();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
   });
 
   it('creates a room with generated credentials and an opaque participant id', async () => {
@@ -97,6 +102,40 @@ describe('Server Room Logic', () => {
     );
   });
 
+  it('rotates the share token after a PIN-based join and invalidates the previous link', async () => {
+    const created = await createRoomForSocket('socket-1', {
+      roomId: 'ROTATE01',
+      pin: '654321',
+      displayName: 'Host',
+    });
+    expect(created.success).toBe(true);
+    if (!created.success) return;
+
+    const joinedByPin = await joinRoomForSocket('socket-2', {
+      roomId: created.roomId,
+      pin: created.pin,
+      displayName: 'Guest',
+    });
+    expect(joinedByPin.success).toBe(true);
+    if (!joinedByPin.success) return;
+
+    const staleLinkAttempt = await joinRoomByLinkForSocket('socket-3', {
+      roomId: created.roomId,
+      shareToken: created.shareToken,
+      displayName: 'Late Guest',
+    });
+    expect(staleLinkAttempt.success).toBe(false);
+    if (staleLinkAttempt.success) return;
+    expect(staleLinkAttempt.error).toContain('invalid or expired');
+
+    const freshLinkAttempt = await joinRoomByLinkForSocket('socket-3', {
+      roomId: created.roomId,
+      shareToken: joinedByPin.shareToken,
+      displayName: 'Late Guest',
+    });
+    expect(freshLinkAttempt.success).toBe(true);
+  });
+
   it('ignores invalid sync payloads and accepts valid participant updates', async () => {
     const created = await createRoomForSocket('socket-1', {
       roomId: 'SYNCROOM',
@@ -136,6 +175,54 @@ describe('Server Room Logic', () => {
     expect(sync.success).toBe(true);
     expect(rooms.get(created.roomId)?.state.position).toBe(999);
     expect(rooms.get(created.roomId)?.state.playing).toBe(true);
+  });
+
+  it('returns an advanced sync snapshot to current participants when playback is active', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-04-17T12:00:00.000Z'));
+
+    const created = await createRoomForSocket('socket-1', {
+      roomId: 'SNAPTIME',
+      pin: '123456',
+      displayName: 'Host',
+    });
+    expect(created.success).toBe(true);
+    if (!created.success) return;
+
+    const sync = applySyncStateForSocket('socket-1', created.roomId, { position: 25, playing: true });
+    expect(sync.success).toBe(true);
+
+    vi.advanceTimersByTime(2500);
+
+    const snapshot = requestSyncStateForSocket('socket-1', created.roomId);
+    expect(snapshot.success).toBe(true);
+    if (!snapshot.success) return;
+
+    expect(snapshot.state.position).toBeCloseTo(27.5);
+    expect(snapshot.state.playing).toBe(true);
+    expect(snapshot.state.updatedAt).toBe(Date.now());
+  });
+
+  it('updates display names for room members and rejects invalid replacements', async () => {
+    const created = await createRoomForSocket('socket-1', {
+      roomId: 'RENAME01',
+      pin: '123456',
+      displayName: 'Host',
+    });
+    expect(created.success).toBe(true);
+    if (!created.success) return;
+
+    const renamed = setDisplayNameForSocket('socket-1', created.roomId, 'Movie Night');
+    expect(renamed.success).toBe(true);
+    if (!renamed.success) return;
+    expect(renamed.memberProfiles).toEqual([
+      expect.objectContaining({ participantId: created.selfParticipantId, displayName: 'Movie Night' }),
+    ]);
+
+    const invalid = setDisplayNameForSocket('socket-1', created.roomId, '');
+    expect(invalid.success).toBe(false);
+    if (invalid.success) return;
+    expect(invalid.error).toContain('between 1 and 24 characters');
   });
 
   it('broadcasts ephemeral chat messages without storing history in rooms', async () => {
@@ -261,6 +348,36 @@ describe('Server Room Logic', () => {
       imageDataUrl: 'data:image/png;base64,QUJDRA==',
     });
     expect(afterDisconnect.success).toBe(true);
+  });
+
+  it('removes disconnected members from rooms and deletes rooms once empty', async () => {
+    const created = await createRoomForSocket('socket-1', {
+      roomId: 'LEAVERS1',
+      pin: '123456',
+      displayName: 'Host',
+    });
+    expect(created.success).toBe(true);
+    if (!created.success) return;
+
+    const joined = await joinRoomForSocket('socket-2', {
+      roomId: created.roomId,
+      pin: created.pin,
+      displayName: 'Guest',
+    });
+    expect(joined.success).toBe(true);
+
+    const firstDisconnect = disconnectSocket('socket-1');
+    expect(firstDisconnect.deletedRoomIds).toEqual([]);
+    expect(firstDisconnect.updatedRoomIds).toEqual([created.roomId]);
+    expect(rooms.get(created.roomId)?.participants).toEqual(['socket-2']);
+    expect(rooms.get(created.roomId)?.memberProfiles).toEqual([
+      expect.objectContaining({ socketId: 'socket-2', displayName: 'Guest' }),
+    ]);
+
+    const secondDisconnect = disconnectSocket('socket-2');
+    expect(secondDisconnect.updatedRoomIds).toEqual([]);
+    expect(secondDisconnect.deletedRoomIds).toEqual([created.roomId]);
+    expect(rooms.has(created.roomId)).toBe(false);
   });
 
   it('returns explicit errors for rejected sync state requests', async () => {
