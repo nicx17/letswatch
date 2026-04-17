@@ -144,7 +144,7 @@ function ChatPanel({
           onKeyDown={handleChatKeyDown}
           placeholder="Type a message or drop an emoji 😄"
           className="chat-input"
-          rows={3}
+          rows={2}
           maxLength={500}
         />
         <div className="chat-compose-row">

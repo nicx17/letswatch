@@ -1,5 +1,11 @@
-import { useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import type { AudioTrackInfo, SyncState } from '../types';
+
+type AudioTracksWithEvents = {
+  addEventListener: (type: string, listener: () => void) => void;
+  removeEventListener: (type: string, listener: () => void) => void;
+  [Symbol.iterator]: () => Iterator<unknown>;
+};
 
 export function useVideoMedia(
   videoRef: React.RefObject<HTMLVideoElement | null>,
@@ -15,6 +21,7 @@ export function useVideoMedia(
 
   const objectUrlRef = useRef<string | null>(null);
   const subtitleUrlRef = useRef<string | null>(null);
+  const audioTracksRef = useRef<AudioTracksWithEvents | null>(null);
 
   const applyState = (state: SyncState) => {
     if (!videoRef.current) return;
@@ -105,6 +112,8 @@ export function useVideoMedia(
   };
 
   const clearVideoFile = () => {
+    detachAudioTrackListeners();
+
     if (videoRef.current) {
       videoRef.current.pause();
       videoRef.current.removeAttribute('src');
@@ -147,6 +156,22 @@ export function useVideoMedia(
     }
   };
 
+  const detachAudioTrackListeners = () => {
+    const audioTracks = audioTracksRef.current;
+    if (!audioTracks) return;
+
+    audioTracks.removeEventListener('change', updateAudioTracksState);
+    audioTracks.removeEventListener('addtrack', updateAudioTracksState);
+    audioTracks.removeEventListener('removetrack', updateAudioTracksState);
+    audioTracksRef.current = null;
+  };
+
+  useEffect(() => () => {
+    detachAudioTrackListeners();
+    // detachAudioTrackListeners only reads stable refs/setters; re-subscribing is unnecessary.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   const handleAudioTrackSwitch = (e: React.ChangeEvent<HTMLSelectElement>) => {
     const trackId = e.target.value;
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -179,11 +204,13 @@ export function useVideoMedia(
 
   const handleVideoLoadedMetadata = () => {
     showSubtitleTrack(videoRef.current, Boolean(subtitleSrc));
-    
+
     updateAudioTracksState();
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const video = videoRef.current as any;
     if (video?.audioTracks) {
+      detachAudioTrackListeners();
+      audioTracksRef.current = video.audioTracks as AudioTracksWithEvents;
       video.audioTracks.addEventListener('change', updateAudioTracksState);
       video.audioTracks.addEventListener('addtrack', updateAudioTracksState);
       video.audioTracks.addEventListener('removetrack', updateAudioTracksState);

@@ -1,5 +1,5 @@
 import 'dotenv/config';
-import express, { type Response } from 'express';
+import express, { type Request, type Response } from 'express';
 import { createServer, IncomingMessage, type IncomingHttpHeaders } from 'node:http';
 import { Server } from 'socket.io';
 import cors from 'cors';
@@ -18,6 +18,32 @@ const app = express();
 const LOG_NAMESPACE = 'server';
 const isProduction = process.env.NODE_ENV === 'production';
 const trustProxy = process.env.TRUST_PROXY === '1' || process.env.TRUST_PROXY === 'true';
+const productionOrigin = (() => {
+  if (!isProduction) return null;
+
+  const appUrl = process.env.APP_URL?.trim();
+  if (!appUrl) {
+    throw new Error('APP_URL must be set when NODE_ENV=production');
+  }
+
+  return new URL(appUrl).origin;
+})();
+const productionHost = productionOrigin ? new URL(productionOrigin).host : null;
+const productionSocketOrigin = productionOrigin
+  ? productionOrigin.replace(/^http:/, 'ws:').replace(/^https:/, 'wss:')
+  : null;
+const cspConnectSrc = [
+  "'self'",
+  ...(productionSocketOrigin ? [productionSocketOrigin] : []),
+  'https://cloudflareinsights.com',
+  'https://static.cloudflareinsights.com',
+];
+const cspImageSrc = [
+  "'self'",
+  'data:',
+  'blob:',
+  'https://twemoji.maxcdn.com',
+];
 
 if (trustProxy) {
   app.set('trust proxy', true);
@@ -125,7 +151,7 @@ app.use(helmet({
       }
     : false,
   contentSecurityPolicy: {
-    useDefaults: false,
+    useDefaults: true,
     directives: {
       "default-src": ["'self'"],
       "script-src": [
@@ -136,13 +162,19 @@ app.use(helmet({
         "'sha256-xEpMjc29DxPGet3wD8QBTFXJ4vGx60/Y07K8AohTM/M='",
         "'sha256-7/wUdeTePWyHkMlev6uiodRq0R9yxOUkCYi4Vu7T7nw='",
       ],
+      "script-src-attr": ["'none'"],
       "style-src": ["'self'", "'unsafe-inline'"],
-      "img-src": ["'self'", 'data:', 'blob:', 'https:'],
-      "connect-src": ["'self'", 'ws:', 'wss:', 'https://cloudflareinsights.com', 'https://static.cloudflareinsights.com'],
+      "font-src": ["'self'", 'data:'],
+      "img-src": cspImageSrc,
+      "connect-src": cspConnectSrc,
       "media-src": ["'self'", 'blob:'],
       "object-src": ["'none'"],
       "base-uri": ["'self'"],
       "frame-ancestors": ["'none'"],
+      "form-action": ["'self'"],
+      "manifest-src": ["'self'"],
+      "worker-src": ["'self'", 'blob:'],
+      "report-uri": ['/csp-violation-report'],
       "trusted-types": ['default'],
       "require-trusted-types-for": ["'script'"],
       "upgrade-insecure-requests": isProduction ? [] : null,
@@ -207,20 +239,6 @@ app.post(
     res.status(204).end();
   },
 );
-
-const getProductionOrigin = () => {
-  if (!isProduction) return null;
-
-  const appUrl = process.env.APP_URL?.trim();
-  if (!appUrl) {
-    throw new Error('APP_URL must be set when NODE_ENV=production');
-  }
-
-  return new URL(appUrl).origin;
-};
-
-const productionOrigin = getProductionOrigin();
-const productionHost = productionOrigin ? new URL(productionOrigin).host : null;
 
 const isPrivateIpv4Host = (hostname: string) => {
   const octets = hostname.split('.');
@@ -306,6 +324,11 @@ const getForwardedClientAddress = (headers: IncomingHttpHeaders | undefined) => 
 const getSocketClientIdentity = (socket: { handshake: { address: string; headers: IncomingHttpHeaders } }) =>
   getForwardedClientAddress(socket.handshake.headers) ||
   socket.handshake.address ||
+  'unknown-client';
+
+const getRequestClientIdentity = (req: Request) =>
+  getForwardedClientAddress(req.headers) ||
+  req.socket.remoteAddress ||
   'unknown-client';
 
 const getProductionRequestHost = (req: IncomingMessage) =>
@@ -436,6 +459,8 @@ const buildAuthRateLimitKey = (clientIdentity: string, roomScope: string) => `au
 const isAuthRateLimited = (clientIdentity: string, roomScope: string) =>
   consumeRateLimit(buildAuthRateLimitKey(clientIdentity, roomScope), 8, 10_000);
 const isImageRateLimited = (socketId: string) => consumeRateLimit(`${socketId}:image`, 3, 30000, socketId);
+const isHttpRequestRateLimited = (clientIdentity: string, scope: string) =>
+  consumeRateLimit(`http:${scope}:${clientIdentity}`, 120, 60_000);
 
 export const SeekSchema = z.object({
   position: z.number().nonnegative(),
@@ -472,7 +497,7 @@ const ImageChatPayloadSchema = z.object({
     .string()
     .trim()
     .regex(/^data:image\/(?:png|jpeg|jpg|gif|webp);base64,[A-Za-z0-9+/=]+$/)
-    .max(1_800_000),
+    .max(900_000),
 });
 
 const ChatPayloadSchema = z.union([TextChatPayloadSchema, ImageChatPayloadSchema]);
@@ -1244,6 +1269,10 @@ if (process.env.NODE_ENV === 'production') {
     // Always serve a fresh shell so clients receive the latest asset manifest.
     res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
     try {
+      if (isHttpRequestRateLimited(getRequestClientIdentity(req), 'html-shell')) {
+        res.status(429).send('Too many requests');
+        return;
+      }
       const nonce = String(res.locals.cspNonce ?? '');
       res.send(await renderIndexHtml(nonce));
     } catch (error) {

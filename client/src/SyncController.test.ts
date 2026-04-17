@@ -1,38 +1,70 @@
-import { describe, it, expect } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { SyncController } from './SyncController';
 
 describe('SyncController', () => {
-    it('Should calculate zero drift when perfectly synced', () => {
-        const syncController = new SyncController();
-        const serverSnapshot = { position: 10, updatedAt: Date.now() - 1000, playing: true };
-        const localTime = 11; // If it updated 1 second ago at 10s, local time should be 11.
-        
-        const drift = syncController.calculateDrift(localTime, serverSnapshot);
-        expect(drift).toBeLessThan(0.05); // Allow millisecond variance
-    });
+  const syncController = new SyncController();
 
-    it('Should calculate drift correctly when paused', () => {
-        const syncController = new SyncController();
-        const serverSnapshot = { position: 15, updatedAt: Date.now() - 5000, playing: false };
-        const localTime = 15.5; // E.g., user dragged slightly ahead
-        
-        const drift = syncController.calculateDrift(localTime, serverSnapshot);
-        expect(drift).toBeCloseTo(0.5); // Since playing is false, target time is just position (15).
-    });
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-04-17T12:00:00.000Z'));
+  });
 
-    it('shouldForceSync should return true if drift exceeds threshold', () => {
-        const syncController = new SyncController();
-        expect(syncController.shouldForceSync(0.5)).toBe(false);
-        expect(syncController.shouldForceSync(1.5)).toBe(true);
-    });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
 
-    it('Should get expected target time mathematically', () => {
-        const syncController = new SyncController();
-        const past = Date.now() - 2500; // 2.5 seconds ago
-        const serverSnapshot = { position: 30, updatedAt: past, playing: true };
-        
-        const targetTime = syncController.getTargetTime(serverSnapshot);
-        expect(targetTime).toBeGreaterThanOrEqual(32.49);
-        expect(targetTime).toBeLessThanOrEqual(32.51);
-    });
+  it('calculates zero drift when local playback matches the projected server time', () => {
+    const serverSnapshot = {
+      position: 10,
+      updatedAt: Date.now() - 1000,
+      playing: true,
+    };
+
+    expect(syncController.calculateDrift(11, serverSnapshot)).toBe(0);
+  });
+
+  it('measures drift against the frozen server position when playback is paused', () => {
+    const serverSnapshot = {
+      position: 15,
+      updatedAt: Date.now() - 5000,
+      playing: false,
+    };
+
+    expect(syncController.calculateDrift(15.5, serverSnapshot)).toBeCloseTo(0.5);
+  });
+
+  it('treats an omitted playing flag as not advancing playback time', () => {
+    const serverSnapshot = {
+      position: 42,
+      updatedAt: Date.now() - 3000,
+    };
+
+    expect(syncController.calculateDrift(44, serverSnapshot)).toBe(2);
+    expect(syncController.getTargetTime(serverSnapshot)).toBe(42);
+  });
+
+  it('only forces a sync when drift exceeds the threshold', () => {
+    expect(syncController.shouldForceSync(1)).toBe(false);
+    expect(syncController.shouldForceSync(1.0001)).toBe(true);
+  });
+
+  it('projects the current target time from the server snapshot while playing', () => {
+    const serverSnapshot = {
+      position: 30,
+      updatedAt: Date.now() - 2500,
+      playing: true,
+    };
+
+    expect(syncController.getTargetTime(serverSnapshot)).toBe(32.5);
+  });
+
+  it('returns the snapshot position directly when paused', () => {
+    const serverSnapshot = {
+      position: 18.25,
+      updatedAt: Date.now() - 9000,
+      playing: false,
+    };
+
+    expect(syncController.getTargetTime(serverSnapshot)).toBe(18.25);
+  });
 });
