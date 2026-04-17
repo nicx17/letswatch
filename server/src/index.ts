@@ -175,8 +175,6 @@ app.use(helmet({
       "manifest-src": ["'self'"],
       "worker-src": ["'self'", 'blob:'],
       "report-uri": ['/csp-violation-report'],
-      "trusted-types": ['default'],
-      "require-trusted-types-for": ["'script'"],
       "upgrade-insecure-requests": isProduction ? [] : null,
     },
   },
@@ -1243,10 +1241,8 @@ if (process.env.NODE_ENV === 'production') {
   const indexHtmlPath = path.resolve(clientBuildPath, 'index.html');
   const indexHtmlTemplatePromise = readFile(indexHtmlPath, 'utf8');
   const renderIndexHtml = async (nonce: string) => {
-    const bootstrapScript = `<script nonce="${nonce}">(()=>{try{const tt=globalThis.trustedTypes;if(!tt||typeof tt.createPolicy!=='function')return;tt.createPolicy('default',{createHTML:(input)=>input,createScript:(input)=>input,createScriptURL:(input)=>input});}catch{}})();</script>`;
     const html = await indexHtmlTemplatePromise;
-    const htmlWithNonce = addNonceToScriptTags(html, nonce);
-    return injectHtmlIntoHead(htmlWithNonce, bootstrapScript);
+    return addNonceToScriptTags(html, nonce);
   };
 
   app.get('/index.html', (_req, res) => {

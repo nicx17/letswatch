@@ -111,7 +111,6 @@ What these commands do:
 ## Security Headers
 
 - CSP is emitted as an HTTP response header and uses nonce-augmented `script-src` with strict-dynamic support (without `unsafe-inline` for scripts).
-- Trusted Types is enforced via CSP (`require-trusted-types-for 'script'`) and the HTML shell injects an early default policy bootstrap for runtime compatibility.
 - HSTS is enabled in production with long max-age, subdomain coverage, and preload.
 
 See [`DEPLOYMENT.md`](DEPLOYMENT.md) for a full deployment walkthrough.

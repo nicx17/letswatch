@@ -19,7 +19,6 @@ Current header behavior:
 
 - HSTS is enabled in production.
 - CSP uses a per-response nonce on scripts.
-- Trusted Types is enabled with `require-trusted-types-for 'script'`.
 - `frame-ancestors` is set to `none`.
 - `object-src` is set to `none`.
 
