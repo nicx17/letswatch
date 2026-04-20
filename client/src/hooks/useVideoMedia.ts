@@ -69,6 +69,7 @@ export function useVideoMedia(
       .replaceAll('&', '&amp;')
       .replaceAll('<', '&lt;')
       .replaceAll('>', '&gt;')
+      .replaceAll('--&gt;', '-->')
       // Standard SRT to VTT formatting
       .replaceAll('\r\n', '\n')
       .replaceAll('\r', '\n')
