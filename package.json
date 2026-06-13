@@ -8,6 +8,8 @@
     "lint": "npm --prefix client run lint && npm --prefix server run lint",
     "test": "npm --prefix client run test && npm --prefix server run test",
     "build": "npm --prefix client run build && npm --prefix server run build",
+    "audit:all": "cd client && npm audit && cd ../server && npm audit",
+
     "build:all": "npm run build",
     "start": "cd server && npm run start"
   },
