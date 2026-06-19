@@ -49,7 +49,14 @@ Build output:
 
 ## Start
 
-Run the backend from `server/`:
+Run the backend from `server/` using PM2:
+
+```bash
+cd server
+pm2 start npm --name "letswatch" -- start
+```
+
+Or to run it directly:
 
 ```bash
 cd server

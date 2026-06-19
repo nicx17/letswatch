@@ -1,0 +1,28 @@
+# Lets Watch
+
+> Lets Watch is a local-first watch-party app for self-hosted environments. Each viewer opens the video file from their own machine, while the server only coordinates playback state over Socket.IO.
+
+Important notes:
+
+- Built with React 19 + Vite (frontend) and Express + Socket.IO (backend).
+- Emphasizes privacy: media remains local, chat history isn't stored on the server.
+- Security controls include Helmet, Zod validation, rate limiting, and explicit CORS headers.
+- Uses WebSockets to sync play, pause, and seek events across a room with shared participant control.
+- Room access is protected by a 6-digit PIN and rate limits on join attempts.
+- Deployed and managed in production using PM2.
+
+## Documentation
+
+- [Deployment Guide](https://github.com/nicx17/letswatch/blob/main/DEPLOYMENT.md): Production setup and hosting notes.
+- [Security Notes](https://github.com/nicx17/letswatch/blob/main/SECURITY.md): Current controls, limitations, and security workflow.
+
+## Source Code
+
+- [Client Source](https://github.com/nicx17/letswatch/tree/main/client): React frontend code.
+- [Server Source](https://github.com/nicx17/letswatch/tree/main/server): Express and Socket.IO backend code.
+
+## Optional
+
+- [Socket.IO Documentation](https://socket.io/docs/v4/): Real-time bidirectional event-based communication used by the backend.
+- [React Documentation](https://react.dev/): Frontend library used for the UI.
+- [Vite Documentation](https://vitejs.dev/): Build tool used for the frontend.
