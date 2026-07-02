@@ -13,7 +13,7 @@
   },
   "dependencies": {
     "@fontsource/noto-color-emoji": "^5.2.12",
-    "@tailwindcss/vite": "^4.2.2",
+    "@tailwindcss/vite": "^4.3.2",
     "lucide-react": "^1.17.0",
     "react": "^19.2.4",
     "react-dom": "^19.2.6",
