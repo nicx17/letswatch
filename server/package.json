@@ -15,23 +15,23 @@
   "license": "GPL-3.0-or-later",
   "type": "module",
   "dependencies": {
-    "compression": "^1.8.1",
+    "compression": "^1.8.2",
     "cors": "^2.8.6",
-    "dotenv": "^17.4.2",
+    "dotenv": "^18.0.5",
     "express": "^5.2.1",
     "helmet": "^8.3.0",
-    "socket.io": "^4.8.3",
-    "tsx": "^4.23.12",
-    "zod": "^4.4.3"
+    "socket.io": "^4.8.4",
+    "tsx": "^4.23.15",
+    "zod": "^4.6.5"
   },
   "devDependencies": {
     "@types/compression": "^1.8.1",
     "@types/cors": "^2.8.19",
     "@types/express": "^5.0.6",
-    "@types/node": "^26.2.0",
+    "@types/node": "^26.6.4",
     "nodemon": "^3.1.14",
-    "socket.io-client": "^4.8.3",
+    "socket.io-client": "^4.8.4",
     "typescript": "^6.0.3",
-    "vitest": "^4.1.11"
+    "vitest": "^5.0.3"
   }
 }
