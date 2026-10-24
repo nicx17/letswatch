@@ -5,13 +5,11 @@ import {
   FileText,
   Upload,
   Users,
-  WifiOff,
 } from 'lucide-react';
 import type { MemberProfile } from '../types';
 
 interface SidebarColumnProps {
   isTheaterMode: boolean;
-  isConnected: boolean;
   participantsCount: number;
   roomId: string;
   roomLinkCopied: boolean;
@@ -34,7 +32,6 @@ interface SidebarColumnProps {
 
 export function SidebarColumn({
   isTheaterMode,
-  isConnected,
   participantsCount,
   roomId,
   roomLinkCopied,
@@ -55,21 +52,13 @@ export function SidebarColumn({
   memberProfiles,
 }: Readonly<SidebarColumnProps>) {
   const otherMembers = memberProfiles.filter((member) => member.participantId !== currentParticipantId);
-  const currentMemberName =
-    memberProfiles.find((member) => member.participantId === currentParticipantId)?.displayName || displayName || 'You';
+  const savedDisplayName = memberProfiles.find((member) => member.participantId === currentParticipantId)?.displayName;
+  const currentMemberName = savedDisplayName || displayName || 'You';
+  const trimmedDisplayName = displayName.trim();
+  const hasUnsavedName = trimmedDisplayName.length > 0 && trimmedDisplayName !== savedDisplayName;
 
   return (
     <aside className={`sidebar-column flex flex-col gap-6 ${isTheaterMode ? 'sidebar-column-theater' : ''}`}>
-      {!isConnected && (
-        <div className="status-card status-card-offline">
-          <WifiOff size={24} />
-          <div>
-            <h3 className="text-base font-semibold">Disconnected</h3>
-            <p className="text-sm text-current/80">Reconnecting to the room server.</p>
-          </div>
-        </div>
-      )}
-
       <div className="chrome-panel rounded-[32px] p-7">
         <div className="flex items-start justify-between gap-4">
           <div>
@@ -100,9 +89,15 @@ export function SidebarColumn({
             <p className="block text-[11px] font-semibold uppercase tracking-[0.24em] text-[var(--text-muted)]">
               Room PIN
             </p>
-            <div className="mt-2 rounded-[20px] border border-[var(--border-color)] bg-[var(--panel-quiet)] px-4 py-4 text-center font-mono text-lg font-semibold tracking-[0.12em] text-[var(--text-main)]">
-              {roomPin}
-            </div>
+            {roomPin ? (
+              <div className="mt-2 rounded-[20px] border border-[var(--border-color)] bg-[var(--panel-quiet)] px-4 py-4 text-center font-mono text-lg font-semibold tracking-[0.12em] text-[var(--text-main)]">
+                {roomPin}
+              </div>
+            ) : (
+              <div className="mt-2 rounded-[20px] border border-[var(--border-color)] bg-[var(--panel-quiet)] px-4 py-4 text-center text-sm font-medium text-[var(--text-muted)]">
+                Joined with invite link
+              </div>
+            )}
           </div>
         </div>
 
@@ -154,7 +149,13 @@ export function SidebarColumn({
             <label htmlFor="sidebar-display-name" className="block text-[11px] font-semibold uppercase tracking-[0.24em] text-[var(--text-muted)]">
               Your name
             </label>
-            <div className="mt-2 flex flex-col gap-3 sm:flex-row">
+            <form
+              className="mt-2 flex flex-col gap-3 sm:flex-row"
+              onSubmit={(e) => {
+                e.preventDefault();
+                if (hasUnsavedName) handleSaveDisplayName();
+              }}
+            >
               <input
                 id="sidebar-display-name"
                 name="displayNameSidebar"
@@ -166,10 +167,10 @@ export function SidebarColumn({
                 className="input-shell flex-1 py-3 text-base"
                 maxLength={24}
               />
-              <button type="button" onClick={handleSaveDisplayName} className="secondary-button">
+              <button type="submit" className="secondary-button" disabled={!hasUnsavedName}>
                 Save
               </button>
-            </div>
+            </form>
           </div>
 
           <div className="role-banner role-banner-shared">

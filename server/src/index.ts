@@ -17,7 +17,27 @@ const __dirname = path.dirname(__filename);
 const app = express();
 const LOG_NAMESPACE = 'server';
 const isProduction = process.env.NODE_ENV === 'production';
-const trustProxy = process.env.TRUST_PROXY === '1' || process.env.TRUST_PROXY === 'true';
+
+// PM2 cluster mode and similar runners set NODE_APP_INSTANCE per worker. Room state
+// lives in this process's memory, so a second worker would silently split rooms.
+if (process.env.NODE_APP_INSTANCE && process.env.NODE_APP_INSTANCE !== '0') {
+  throw new Error('Run exactly one server instance: room state is held in process memory');
+}
+
+export const parseTrustedProxyHops = (value: string | undefined) => {
+  const normalized = value?.trim().toLowerCase();
+  if (!normalized || normalized === 'false' || normalized === '0') return 0;
+  if (normalized === 'true') return 1;
+
+  const hops = Number(normalized);
+  if (!Number.isInteger(hops) || hops < 1) {
+    throw new Error('TRUST_PROXY must be true, false, or the number of trusted proxy hops');
+  }
+
+  return hops;
+};
+
+const trustedProxyHops = parseTrustedProxyHops(process.env.TRUST_PROXY);
 const productionOrigin = (() => {
   if (!isProduction) return null;
 
@@ -42,11 +62,10 @@ const cspImageSrc = [
   "'self'",
   'data:',
   'blob:',
-  'https://twemoji.maxcdn.com',
 ];
 
-if (trustProxy) {
-  app.set('trust proxy', true);
+if (trustedProxyHops > 0) {
+  app.set('trust proxy', trustedProxyHops);
 }
 
 type LogLevel = 'info' | 'warn' | 'error';
@@ -217,7 +236,18 @@ const extractCspViolationReport = (body: unknown): CspViolationReport | null => 
 
 app.post(
   '/csp-violation-report',
-  express.json({ type: ['application/csp-report', 'application/reports+json', 'application/json'] }),
+  (req, res, next) => {
+    // Reject floods before spending time parsing bodies or writing logs.
+    if (isHttpRequestRateLimited(getRequestClientIdentity(req), 'csp-report')) {
+      res.status(429).end();
+      return;
+    }
+    next();
+  },
+  express.json({
+    limit: '16kb',
+    type: ['application/csp-report', 'application/reports+json', 'application/json'],
+  }),
   (req, res) => {
     const report = extractCspViolationReport(req.body);
     if (report) {
@@ -295,6 +325,11 @@ app.use(cors({
   methods: ['GET', 'POST']
 }));
 
+app.get('/healthz', (_req, res) => {
+  res.setHeader('Cache-Control', 'no-store');
+  res.json({ status: 'ok' });
+});
+
 const server = createServer(app);
 
 const getSingleHeaderValue = (header: string | string[] | undefined) => {
@@ -309,15 +344,18 @@ const getSocketAck = <T extends unknown[]>(ack: unknown) => {
   return typeof ack === 'function' ? ack as (...args: T) => void : undefined;
 };
 
-const getForwardedClientAddress = (headers: IncomingHttpHeaders | undefined) => {
-  if (!trustProxy) return undefined;
+// Each trusted proxy appends the address it received the request from, so the
+// client sits `hops` entries from the right. Anything further left was supplied
+// by the client and must not be used for rate limiting.
+export const selectForwardedClientAddress = (forwardedFor: string | undefined, hops: number) => {
+  if (hops < 1 || !forwardedFor) return undefined;
 
-  const forwardedFor = getSingleHeaderValue(headers?.['x-forwarded-for']);
-  if (!forwardedFor) return undefined;
-
-  const firstForwardedAddress = forwardedFor.split(',')[0]?.trim();
-  return firstForwardedAddress || undefined;
+  const addresses = forwardedFor.split(',').map((entry) => entry.trim()).filter(Boolean);
+  return addresses[addresses.length - hops];
 };
+
+const getForwardedClientAddress = (headers: IncomingHttpHeaders | undefined) =>
+  selectForwardedClientAddress(getSingleHeaderValue(headers?.['x-forwarded-for']), trustedProxyHops);
 
 const getSocketClientIdentity = (socket: { handshake: { address: string; headers: IncomingHttpHeaders } }) =>
   getForwardedClientAddress(socket.handshake.headers) ||
@@ -337,9 +375,9 @@ const io = new Server(server, {
     origin: corsOrigin,
     methods: ['GET', 'POST'],
   },
-  // Chat image messages travel over Socket.IO as data URLs, so allow a little
-  // extra room above the default buffer while still keeping payloads bounded.
-  maxHttpBufferSize: 2_000_000,
+  // Chat images travel as data URLs capped at 900k characters by the chat schema,
+  // which fits inside Socket.IO's default 1 MB frame limit with room for the envelope.
+  maxHttpBufferSize: 1_000_000,
   allowRequest: (req, callback) => {
     if (!productionOrigin) {
       callback(null, true);
@@ -409,7 +447,14 @@ export const rooms = new Map<string, SyncSession>();
 // Keep a lightweight per-socket budget to avoid noisy clients spamming room events.
 const rateLimits = new Map<string, { count: number, resetAt: number }>();
 const socketOwnedRateLimitKeys = new Map<string, Set<string>>();
+// Pruning scans every entry, so run it at most once per interval instead of on
+// every event; otherwise a flood of distinct keys makes each event slower.
+const RATE_LIMIT_PRUNE_INTERVAL_MS = 1000;
+let lastRateLimitPruneAt = 0;
 const pruneExpiredRateLimits = (now: number) => {
+  if (now - lastRateLimitPruneAt < RATE_LIMIT_PRUNE_INTERVAL_MS) return;
+  lastRateLimitPruneAt = now;
+
   for (const [key, record] of rateLimits.entries()) {
     if (record.resetAt < now) {
       rateLimits.delete(key);
@@ -455,8 +500,25 @@ const consumeRateLimit = (
 export const isRateLimited = (socketId: string) => consumeRateLimit(socketId, 15, 2000, socketId);
 const buildAuthRateLimitKey = (clientIdentity: string, roomScope: string) => `auth:${clientIdentity}:${roomScope}`;
 const isAuthRateLimited = (clientIdentity: string, roomScope: string) =>
+  consumeRateLimit(`auth:${clientIdentity}`, 20, 60_000) ||
   consumeRateLimit(buildAuthRateLimitKey(clientIdentity, roomScope), 8, 10_000);
 const isImageRateLimited = (socketId: string) => consumeRateLimit(`${socketId}:image`, 3, 30000, socketId);
+const roomImageRateLimitKey = (roomId: string) => `room-image:${roomId}`;
+const isRoomImageRateLimited = (roomId: string) => consumeRateLimit(roomImageRateLimitKey(roomId), 10, 30_000);
+
+// Per-identity limits do not stop a brute force spread across many addresses, so
+// each room also stops accepting PINs after too many failures from anyone.
+// Share-link joins are unaffected, so members can still invite people.
+export const ROOM_PIN_FAILURE_LIMIT = 30;
+const ROOM_PIN_FAILURE_WINDOW_MS = 10 * 60_000;
+const roomPinFailureKey = (roomId: string) => `pin-failures:${roomId}`;
+const isRoomPinLocked = (roomId: string) => {
+  const record = rateLimits.get(roomPinFailureKey(roomId));
+  return Boolean(record && record.resetAt >= Date.now() && record.count >= ROOM_PIN_FAILURE_LIMIT);
+};
+const recordRoomPinFailure = (roomId: string) => {
+  consumeRateLimit(roomPinFailureKey(roomId), ROOM_PIN_FAILURE_LIMIT, ROOM_PIN_FAILURE_WINDOW_MS);
+};
 const isHttpRequestRateLimited = (clientIdentity: string, scope: string) =>
   consumeRateLimit(`http:${scope}:${clientIdentity}`, 120, 60_000);
 
@@ -646,6 +708,7 @@ export const resetRuntimeState = () => {
   rooms.clear();
   rateLimits.clear();
   socketOwnedRateLimitKeys.clear();
+  lastRateLimitPruneAt = 0;
 };
 
 export const addNonceToScriptTags = (html: string, nonce: string) => {
@@ -696,6 +759,9 @@ export const createRoomForSocket = async (
   memberProfiles: Array<{ participantId: string; displayName: string }>;
   selfParticipantId: string;
 }>> => {
+  if (isRateLimited(socketId)) {
+    return { success: false, error: 'Rate limited' };
+  }
   if (isAuthRateLimited(clientIdentity, 'create')) {
     return { success: false, error: 'Too many authentication attempts. Please wait a moment and try again.' };
   }
@@ -758,6 +824,10 @@ export const joinRoomForSocket = async (
   memberProfiles: Array<{ participantId: string; displayName: string }>;
   selfParticipantId?: string;
 }>> => {
+  if (isRateLimited(socketId)) {
+    return { success: false, error: 'Rate limited' };
+  }
+
   const parsedPayload = JoinRoomSchema.safeParse(payload);
   if (!parsedPayload.success) {
     return { success: false, error: 'Invalid room credentials' };
@@ -770,7 +840,17 @@ export const joinRoomForSocket = async (
   const pin = normalizePin(parsedPayload.data.pin);
   const { displayName } = parsedPayload.data;
   const room = rooms.get(roomId);
-  if (!room || !await verifyPin(room, pin)) {
+  if (!room) {
+    return { success: false, error: 'Room not found or PIN is incorrect' };
+  }
+  if (isRoomPinLocked(roomId)) {
+    return {
+      success: false,
+      error: 'This room is temporarily locked after too many incorrect PINs. Ask for an invite link or try again later.',
+    };
+  }
+  if (!await verifyPin(room, pin)) {
+    recordRoomPinFailure(roomId);
     return { success: false, error: 'Room not found or PIN is incorrect' };
   }
 
@@ -805,6 +885,10 @@ export const joinRoomByLinkForSocket = async (
   memberProfiles: Array<{ participantId: string; displayName: string }>;
   selfParticipantId?: string;
 }>> => {
+  if (isRateLimited(socketId)) {
+    return { success: false, error: 'Rate limited' };
+  }
+
   const parsedPayload = LinkJoinRoomSchema.safeParse(payload);
   if (!parsedPayload.success) {
     return { success: false, error: 'Invalid room link' };
@@ -939,6 +1023,10 @@ export const sendChatMessageForSocket = (
   if (parsedMessage.data.type === 'image' && isImageRateLimited(socketId)) {
     return { success: false, error: 'You are sending images too quickly' };
   }
+  // Every image is fanned out to the whole room, so cap the room's total as well.
+  if (parsedMessage.data.type === 'image' && isRoomImageRateLimited(roomId)) {
+    return { success: false, error: 'This room is sharing images too quickly. Try again shortly.' };
+  }
 
   const message: ChatMessage = {
     id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
@@ -972,6 +1060,9 @@ export const disconnectSocket = (socketId: string) => {
     room.memberProfiles = room.memberProfiles.filter((member) => member.socketId !== socketId);
     if (room.participants.length === 0) {
       rooms.delete(roomId);
+      // A new room reusing this code must not inherit the old room's limits.
+      rateLimits.delete(roomPinFailureKey(roomId));
+      rateLimits.delete(roomImageRateLimitKey(roomId));
       deletedRoomIds.push(roomId);
       return;
     }
@@ -1278,8 +1369,28 @@ if (process.env.NODE_ENV === 'production') {
 }
 
 const PORT = process.env.PORT ? Number.parseInt(process.env.PORT, 10) : 4000;
+// Behind a reverse proxy, set HOST=127.0.0.1 so clients cannot bypass the proxy.
+const HOST = process.env.HOST?.trim() || '0.0.0.0';
+const SHUTDOWN_TIMEOUT_MS = 5000;
+
+const shutdown = (signal: NodeJS.Signals) => {
+  writeLog('info', 'server.stopping', { signal });
+  // Closing Socket.IO also closes the HTTP server once open requests finish.
+  io.close(() => {
+    writeLog('info', 'server.stopped', { signal });
+    process.exit(0);
+  });
+  setTimeout(() => {
+    writeLog('warn', 'server.stop_timeout', { signal });
+    process.exit(1);
+  }, SHUTDOWN_TIMEOUT_MS).unref();
+};
+
 if (process.env.NODE_ENV !== 'test') {
-  server.listen(PORT, '0.0.0.0', () => {
+  process.once('SIGTERM', shutdown);
+  process.once('SIGINT', shutdown);
+
+  server.listen(PORT, HOST, () => {
     writeLog('info', 'server.started', {
       port: PORT,
       nodeEnv: process.env.NODE_ENV ?? 'development',

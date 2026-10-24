@@ -74,11 +74,15 @@ This repository uses in-memory rate limiting.
 
 Current limiter behavior:
 
-- normal room events are limited per socket
-- image chat sends have a separate per-socket limit
-- auth flows have a separate limit keyed by client identity and room scope
-- limiter entries are pruned after expiry
-- socket-owned limiter entries are deleted on disconnect
+- all room events, including create and join attempts, are limited per socket (15 per 2 seconds)
+- image chat sends have a separate per-socket limit (3 per 30 seconds) and a per-room limit (10 per 30 seconds across all senders)
+- auth flows are limited per client identity: 20 attempts per minute overall, and 8 per 10 seconds for any one room code
+- each room stops accepting PINs for 10 minutes after 30 incorrect PINs from any mix of clients; share-link joins keep working
+- `/csp-violation-report` and the HTML shell are limited per client identity (120 requests per minute each)
+- expired limiter entries are pruned at most once per second, so the cost of an event does not grow with the number of stored entries
+- socket-owned limiter entries are deleted on disconnect, and room-scoped entries are deleted when the room closes
+
+The client identity is the socket's remote address. When `TRUST_PROXY` is set to a hop count, the server counts that many entries from the **right** of `X-Forwarded-For`, so addresses a client injects at the left are ignored. See [`DEPLOYMENT.md`](DEPLOYMENT.md#client-ip-and-trust_proxy).
 
 This limiter is process-local and does not coordinate across replicas.
 
@@ -125,9 +129,23 @@ Important boundaries:
 
 - auth hashing is asynchronous, but still consumes CPU and worker-thread capacity
 - rate limits are local to a single process
-- accepted chat images are still broadcast to all room members
+- accepted chat images are still broadcast to all room members: up to about 900 KB per image, 20 members per room, and 10 images per room every 30 seconds
+- any connected socket, including one that has not joined a room, may send frames up to 1 MB (`maxHttpBufferSize`)
+- `/csp-violation-report` accepts JSON bodies up to 16 KB and writes each accepted report to the log
 - malformed traffic still consumes parsing, validation, and logging work
 - the frontend shell is cached in memory, but requests still execute Express and Socket.IO admission logic
+
+### PIN Strength
+
+A room PIN has 10^6 possible values. The per-identity auth limits slow down a single client. The per-room lockout (30 failures per 10 minutes) caps a brute force spread across many addresses at roughly 4,300 guesses a day, so covering half the PIN space would take months.
+
+The lockout has a trade-off: anyone who knows a room code can keep that room's PIN entry locked. Members can still invite people with the share link, which is not affected. Each attempt against an existing room runs `scrypt` on the libuv thread pool, so join attempts still cost CPU until a limit rejects them.
+
+### Share Tokens In URLs
+
+Invite links carry the share token in the URL fragment (`?room=CODE#token=...`). Browsers do not send fragments to servers, so the token stays out of server, proxy, and CDN access logs. The client removes it from the address bar after joining. A share token stays valid until a PIN-based join rotates it or the room closes.
+
+Links copied from older versions put the token in the query string. They still work, but the first page load of such a link sends the token to the server.
 
 ### CORS And Origin Checks
 

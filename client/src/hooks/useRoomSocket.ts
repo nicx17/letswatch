@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState, useEffectEvent } from 'react';
 import { io, Socket } from 'socket.io-client';
 import { SyncController } from '../SyncController';
+import { appendChatMessage } from '../chatHistory';
 
 interface SyncState {
   playing: boolean;
@@ -38,7 +39,8 @@ interface ChatMessage {
 
 const ACTIVE_SHARE_LINK_STORAGE_KEY = 'letswatch-active-share-link';
 const MAX_CHAT_IMAGE_FILE_SIZE = 2 * 1024 * 1024;
-const MAX_CHAT_IMAGE_UPLOAD_BYTES = 850 * 1024;
+// The server rejects image data URLs longer than 900,000 characters; stay safely below.
+const MAX_CHAT_IMAGE_DATA_URL_LENGTH = 880_000;
 const MAX_CHAT_IMAGE_DIMENSION = 1280;
 
 const getDefaultSocketUrl = () => {
@@ -96,8 +98,8 @@ const loadImageElement = (dataUrl: string) =>
 const compressChatImage = async (file: File) => {
   if (file.type === 'image/gif') {
     const originalDataUrl = await readFileAsDataUrl(file);
-    if (getApproximateDataUrlSizeBytes(originalDataUrl) > MAX_CHAT_IMAGE_UPLOAD_BYTES) {
-      throw new Error('GIFs must stay under 850KB. Try a smaller GIF or a static image.');
+    if (originalDataUrl.length > MAX_CHAT_IMAGE_DATA_URL_LENGTH) {
+      throw new Error('GIFs must stay under about 640KB. Try a smaller GIF or a static image.');
     }
     return originalDataUrl;
   }
@@ -124,7 +126,7 @@ const compressChatImage = async (file: File) => {
       const candidate = canvas.toDataURL('image/webp', quality);
       bestResult = candidate;
 
-      if (getApproximateDataUrlSizeBytes(candidate) <= MAX_CHAT_IMAGE_UPLOAD_BYTES) {
+      if (candidate.length <= MAX_CHAT_IMAGE_DATA_URL_LENGTH) {
         return candidate;
       }
     }
@@ -132,7 +134,7 @@ const compressChatImage = async (file: File) => {
     scale *= 0.82;
   }
 
-  if (getApproximateDataUrlSizeBytes(bestResult) > MAX_CHAT_IMAGE_UPLOAD_BYTES) {
+  if (bestResult.length > MAX_CHAT_IMAGE_DATA_URL_LENGTH) {
     throw new Error('Image is still too large after compression. Try a smaller image.');
   }
 
@@ -152,9 +154,11 @@ interface UseRoomSocketOptions {
   shareToken: string;
   setShareToken: React.Dispatch<React.SetStateAction<string>>;
   videoRef: React.RefObject<HTMLVideoElement | null>;
+  latestRoomStateRef: React.RefObject<SyncState | null>;
   syncController: SyncController;
   applyState: (state: SyncState) => void;
   clientLog: (level: 'info' | 'warn' | 'error', event: string, meta?: Record<string, unknown>) => void;
+  notify: (message: string) => void;
 }
 
 export function useRoomSocket(options: UseRoomSocketOptions) {
@@ -166,9 +170,11 @@ export function useRoomSocket(options: UseRoomSocketOptions) {
     sharedRoomId, setSharedRoomId,
     shareToken, setShareToken,
     videoRef,
+    latestRoomStateRef,
     syncController,
     applyState,
     clientLog,
+    notify,
   } = options;
 
   const [isJoined, setIsJoined] = useState(false);
@@ -186,38 +192,35 @@ export function useRoomSocket(options: UseRoomSocketOptions) {
   const socketRef = useRef<Socket | null>(null);
   const chatInputRef = useRef<HTMLTextAreaElement>(null);
   const chatImageInputRef = useRef<HTMLInputElement>(null);
-  const latestRoomStateRef = useRef<SyncState | null>(null);
-  const ignoreEvents = useRef({ play: false, pause: false, seek: false });
+  const lastLocalBroadcastAtRef = useRef(0);
 
+  // Share tokens live in the URL fragment (never sent to servers) and, for older
+  // links, the query string. Both are stripped once the token has been read.
   const clearShareUrl = () => {
     const browserWindow = globalThis.window;
     if (!browserWindow) return;
     const url = new URL(browserWindow.location.href);
     url.searchParams.delete('room');
     url.searchParams.delete('token');
+    url.hash = '';
     browserWindow.history.replaceState({}, '', url.toString());
   };
 
-  const updateShareUrl = (nextRoomId: string, nextShareToken?: string) => {
+  const updateShareUrl = (nextRoomId: string) => {
     const browserWindow = globalThis.window;
     if (!browserWindow) return;
     const url = new URL(browserWindow.location.href);
     url.searchParams.set('room', nextRoomId);
-    if (nextShareToken) {
-      url.searchParams.set('token', nextShareToken);
-    } else {
-      url.searchParams.delete('token');
-    }
+    url.searchParams.delete('token');
+    url.hash = '';
     browserWindow.history.replaceState({}, '', url.toString());
   };
 
   const applyAuthoritativeState = (state: SyncState) => {
-    latestRoomStateRef.current = state;
-    ignoreEvents.current = { play: true, pause: true, seek: true };
+    // The server already projected `position` to its send time; anchor it to our
+    // clock so drift checks are not skewed by server/client clock differences.
+    latestRoomStateRef.current = { ...state, updatedAt: Date.now() };
     applyState(state);
-    setTimeout(() => {
-      ignoreEvents.current = { play: false, pause: false, seek: false };
-    }, 500);
   };
 
   const syncFromRoomResponse = (response: SyncResponse) => {
@@ -253,7 +256,7 @@ export function useRoomSocket(options: UseRoomSocketOptions) {
       joinMode: joinMode ?? 'unknown',
       error: response.error,
     });
-    alert(response.error || 'Unable to reconnect to the room');
+    notify(response.error || 'Unable to reconnect to the room');
   };
 
   const handleManualSync = () => {
@@ -297,7 +300,7 @@ export function useRoomSocket(options: UseRoomSocketOptions) {
       clearShareLinkSession();
       clearShareUrl();
       clientLog('warn', 'room.link_join.failed', { roomId: normalizedRoomId, error: response.error });
-      alert(response.error || 'Failed to join shared room');
+      notify(response.error || 'Failed to join shared room');
     });
   });
 
@@ -337,7 +340,7 @@ export function useRoomSocket(options: UseRoomSocketOptions) {
   });
 
   const handleChatMessage = useEffectEvent((message: ChatMessage) => {
-    setChatMessages((current) => [...current, message].slice(-120));
+    setChatMessages((current) => appendChatMessage(current, message));
     if (isChatCollapsed && message.participantId !== currentParticipantId) {
       setUnreadMessages((current) => current + 1);
     }
@@ -394,8 +397,12 @@ export function useRoomSocket(options: UseRoomSocketOptions) {
     const interval = setInterval(() => {
       const socket = socketRef.current;
       if (!socket) return;
+      const requestedAt = Date.now();
       socket.emit('force_sync_request', roomId, (response: SyncResponse) => {
         if (!videoRef.current || !response?.success || !response.state) return;
+        // A snapshot requested before our own latest play/pause/seek is stale;
+        // applying it would undo the action the user just took.
+        if (requestedAt < lastLocalBroadcastAtRef.current) return;
         const normalizedState: SyncState = {
           position: response.state.position,
           playing: response.state.playing,
@@ -437,7 +444,7 @@ export function useRoomSocket(options: UseRoomSocketOptions) {
         clientLog('info', 'room.create.succeeded', { roomId: resolvedRoomId, selfParticipantId: response.selfParticipantId });
       } else {
         clientLog('warn', 'room.create.failed', { error: response.error });
-        alert(response.error || 'Failed to create room');
+        notify(response.error || 'Failed to create room');
       }
     });
   };
@@ -464,43 +471,32 @@ export function useRoomSocket(options: UseRoomSocketOptions) {
         clientLog('info', 'room.join.succeeded', { roomId: resolvedRoomId, selfParticipantId: response.selfParticipantId });
       } else {
         clientLog('warn', 'room.join.failed', { roomId: normalizedRoomId, error: response.error });
-        alert(response.error || 'Failed to join room');
+        notify(response.error || 'Failed to join room');
       }
     });
   };
 
-  const handlePlay = () => {
+  // play, pause, and seeked all report the same thing: where local playback is now.
+  const broadcastLocalPlayback = () => {
     const socket = socketRef.current;
-    if (ignoreEvents.current.play) {
-      ignoreEvents.current.play = false;
-      return;
-    }
-    if (socket && isJoined && videoRef.current) {
-      socket.emit('sync_state', roomId, { position: videoRef.current.currentTime, playing: true });
-    }
+    const video = videoRef.current;
+    if (!socket || !isJoined || !video) return;
+
+    const localState = { position: video.currentTime, playing: !video.paused };
+    // Applying room state (joins, remote updates, drift correction) fires these same
+    // media events. Comparing with the room state filters those echoes however long
+    // the seek takes, where a fixed timer would let slow seeks leak back out.
+    if (syncController.matchesRoomState(localState, latestRoomStateRef.current)) return;
+
+    const now = Date.now();
+    latestRoomStateRef.current = { ...localState, updatedAt: now };
+    lastLocalBroadcastAtRef.current = now;
+    socket.emit('sync_state', roomId, localState);
   };
 
-  const handlePause = () => {
-    const socket = socketRef.current;
-    if (ignoreEvents.current.pause) {
-      ignoreEvents.current.pause = false;
-      return;
-    }
-    if (socket && isJoined && videoRef.current) {
-      socket.emit('sync_state', roomId, { position: videoRef.current.currentTime, playing: false });
-    }
-  };
-
-  const handleSeeked = () => {
-    const socket = socketRef.current;
-    if (ignoreEvents.current.seek) {
-      ignoreEvents.current.seek = false;
-      return;
-    }
-    if (socket && isJoined && videoRef.current) {
-      socket.emit('sync_state', roomId, { position: videoRef.current.currentTime, playing: !videoRef.current.paused });
-    }
-  };
+  const handlePlay = broadcastLocalPlayback;
+  const handlePause = broadcastLocalPlayback;
+  const handleSeeked = broadcastLocalPlayback;
 
   const handleSaveDisplayName = () => {
     const socket = socketRef.current;
@@ -508,7 +504,7 @@ export function useRoomSocket(options: UseRoomSocketOptions) {
     socket.emit('set_display_name', roomId, displayName, (response: SyncResponse) => {
       if (!response.success) {
         clientLog('warn', 'profile.save_failed', { roomId, error: response.error });
-        alert(response.error || 'Unable to save name');
+        notify(response.error || 'Unable to save name');
         return;
       }
       if (response.memberProfiles) {
@@ -527,7 +523,7 @@ export function useRoomSocket(options: UseRoomSocketOptions) {
     socket.emit('send_chat_message', roomId, { type: 'text', text: trimmedDraft }, (response: SyncResponse) => {
       if (!response.success) {
         clientLog('warn', 'chat.text_failed', { roomId, error: response.error });
-        alert(response.error || 'Unable to send message');
+        notify(response.error || 'Unable to send message');
         return;
       }
       setChatDraft('');
@@ -568,7 +564,7 @@ export function useRoomSocket(options: UseRoomSocketOptions) {
     if (!file || !socket || !isJoined) return;
 
     if (file.size > MAX_CHAT_IMAGE_FILE_SIZE) {
-      alert('Image is too large. Must be under 2MB.');
+      notify('Image is too large. Must be under 2MB.');
       e.target.value = '';
       return;
     }
@@ -578,7 +574,7 @@ export function useRoomSocket(options: UseRoomSocketOptions) {
       socket.emit('send_chat_message', roomId, { type: 'image', imageDataUrl: dataUrl }, (response: SyncResponse) => {
         if (!response.success) {
           clientLog('warn', 'chat.image_failed', { roomId, error: response.error });
-          alert(response.error || 'Unable to send image');
+          notify(response.error || 'Unable to send image');
           return;
         }
         clientLog('info', 'chat.image_sent', {
@@ -590,7 +586,7 @@ export function useRoomSocket(options: UseRoomSocketOptions) {
       .catch((error: unknown) => {
         const message = error instanceof Error ? error.message : 'Unable to prepare image';
         clientLog('warn', 'chat.image_prepare_failed', { roomId, error: message });
-        alert(message);
+        notify(message);
       });
     e.target.value = '';
   };
@@ -627,7 +623,6 @@ export function useRoomSocket(options: UseRoomSocketOptions) {
     socketRef,
     chatInputRef,
     chatImageInputRef,
-    latestRoomStateRef,
     handleManualSync,
     handleCreateRoom,
     handleJoin,

@@ -13,13 +13,13 @@ Important notes:
 
 ## Documentation
 
-- [Deployment Guide](https://github.com/nicx17/letswatch/blob/main/DEPLOYMENT.md): Production setup and hosting notes.
-- [Security Notes](https://github.com/nicx17/letswatch/blob/main/SECURITY.md): Current controls, limitations, and security workflow.
+- [Deployment Guide](https://github.com/nicx17/letswatch/blob/master/DEPLOYMENT.md): Production setup and hosting notes.
+- [Security Notes](https://github.com/nicx17/letswatch/blob/master/SECURITY.md): Current controls, limitations, and security workflow.
 
 ## Source Code
 
-- [Client Source](https://github.com/nicx17/letswatch/tree/main/client): React frontend code.
-- [Server Source](https://github.com/nicx17/letswatch/tree/main/server): Express and Socket.IO backend code.
+- [Client Source](https://github.com/nicx17/letswatch/tree/master/client): React frontend code.
+- [Server Source](https://github.com/nicx17/letswatch/tree/master/server): Express and Socket.IO backend code.
 
 ## Optional
 

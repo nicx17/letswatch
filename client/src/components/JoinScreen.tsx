@@ -122,6 +122,7 @@ export function JoinScreen({
                 value={roomId}
                 onChange={(e) => setRoomId(e.target.value.toUpperCase())}
                 className="input-shell"
+                maxLength={36}
               />
             </div>
 

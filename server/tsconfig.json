@@ -37,6 +37,8 @@
     "jsx": "react-jsx",
     "verbatimModuleSyntax": true,
     "isolatedModules": true,
+    // The server runs directly on Node's type stripping, which only supports erasable syntax.
+    "erasableSyntaxOnly": true,
     "noUncheckedSideEffectImports": true,
     "moduleDetection": "force",
     "skipLibCheck": true,

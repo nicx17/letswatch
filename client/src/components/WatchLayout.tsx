@@ -18,10 +18,6 @@ import {
 import { SidebarColumn } from './SidebarColumn';
 import type { AudioTrackInfo, ChatMessage, MemberProfile } from '../types';
 
-interface EmojiTextProps {
-  text: string;
-}
-
 interface ChatPanelProps {
   chatScrollRef: React.RefObject<HTMLDivElement | null>;
   chatInputRef: React.RefObject<HTMLTextAreaElement | null>;
@@ -37,7 +33,6 @@ interface ChatPanelProps {
   handleEmojiSelect: (emoji: string) => void;
   handleEmojiStripToggle: () => void;
   handleChatImageChange: (e: React.ChangeEvent<HTMLInputElement>) => void;
-  EmojiText: React.ComponentType<EmojiTextProps>;
   topChatEmojis: string[];
 }
 
@@ -56,7 +51,6 @@ function ChatPanel({
   handleEmojiSelect,
   handleEmojiStripToggle,
   handleChatImageChange,
-  EmojiText,
   topChatEmojis,
 }: Readonly<ChatPanelProps>) {
   const isEmojiStripOpen = !isEmojiStripCollapsed;
@@ -76,7 +70,7 @@ function ChatPanel({
         </div>
       </div>
 
-      <div ref={chatScrollRef} className="chat-log">
+      <div ref={chatScrollRef} className="chat-log" role="log" aria-live="polite" aria-label="Chat messages">
         {chatMessages.length > 0 ? (
           chatMessages.map((message) => {
             const isOwnMessage = message.participantId === currentParticipantId;
@@ -94,14 +88,20 @@ function ChatPanel({
                   </time>
                 </div>
                 <div className="chat-message-bubble">
-                  {message.type === 'image' && message.imageDataUrl ? (
-                    <img
-                      src={message.imageDataUrl}
-                      alt={`Shared by ${message.displayName}`}
-                      className="chat-image"
-                    />
+                  {message.type === 'image' ? (
+                    message.imageDataUrl ? (
+                      <img
+                        src={message.imageDataUrl}
+                        alt={`Shared by ${message.displayName}`}
+                        className="chat-image"
+                        loading="lazy"
+                        decoding="async"
+                      />
+                    ) : (
+                      <p className="chat-image-expired">Older image removed to save memory</p>
+                    )
                   ) : (
-                    <p><EmojiText text={message.text ?? ''} /></p>
+                    <p>{message.text ?? ''}</p>
                   )}
                 </div>
               </article>
@@ -127,7 +127,7 @@ function ChatPanel({
                 onClick={() => handleEmojiSelect(emoji)}
                 aria-label={`Add ${emoji}`}
               >
-                <EmojiText text={emoji} />
+                {emoji}
               </button>
             ))}
           </div>
@@ -237,10 +237,8 @@ interface WatchLayoutProps {
   handleEmojiSelect: (emoji: string) => void;
   handleEmojiStripToggle: () => void;
   handleChatImageChange: (e: React.ChangeEvent<HTMLInputElement>) => void;
-  EmojiText: React.ComponentType<EmojiTextProps>;
   topChatEmojis: string[];
   // Sidebar
-  isConnected: boolean;
   roomId: string;
   roomPin: string;
   roomLinkCopied: boolean;
@@ -290,9 +288,7 @@ export function WatchLayout({
   handleEmojiSelect,
   handleEmojiStripToggle,
   handleChatImageChange,
-  EmojiText,
   topChatEmojis,
-  isConnected,
   roomId,
   roomPin,
   roomLinkCopied,
@@ -429,7 +425,6 @@ export function WatchLayout({
               handleEmojiSelect={handleEmojiSelect}
               handleEmojiStripToggle={handleEmojiStripToggle}
               handleChatImageChange={handleChatImageChange}
-              EmojiText={EmojiText}
               topChatEmojis={topChatEmojis}
             />
           ) : null}
@@ -438,7 +433,6 @@ export function WatchLayout({
 
       <SidebarColumn
         isTheaterMode={isTheaterMode}
-        isConnected={isConnected}
         participantsCount={participantsCount}
         roomId={roomId}
         roomLinkCopied={roomLinkCopied}

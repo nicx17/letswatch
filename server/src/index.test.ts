@@ -9,10 +9,14 @@ import {
   io,
   joinRoomByLinkForSocket,
   joinRoomForSocket,
+  parseTrustedProxyHops,
   requestSyncStateForSocket,
   resetRuntimeState,
+  ROOM_PIN_FAILURE_LIMIT,
   rooms,
+  selectForwardedClientAddress,
   sendChatMessageForSocket,
+  server,
   setDisplayNameForSocket,
 } from './index.js';
 
@@ -464,5 +468,141 @@ describe('Socket.IO hardening', () => {
       success: false,
       error: 'Room not found',
     });
+  });
+});
+
+describe('Client identity behind proxies', () => {
+  it('takes the client address from the trusted end of X-Forwarded-For', () => {
+    expect(selectForwardedClientAddress('6.6.6.6, 203.0.113.5', 1)).toBe('203.0.113.5');
+    expect(selectForwardedClientAddress('6.6.6.6, 203.0.113.5, 198.51.100.1', 2)).toBe('203.0.113.5');
+  });
+
+  it('ignores X-Forwarded-For when no proxy is trusted or the chain is too short', () => {
+    expect(selectForwardedClientAddress('203.0.113.5', 0)).toBeUndefined();
+    expect(selectForwardedClientAddress('203.0.113.5', 2)).toBeUndefined();
+    expect(selectForwardedClientAddress(undefined, 1)).toBeUndefined();
+  });
+
+  it('parses TRUST_PROXY as a hop count', () => {
+    expect(parseTrustedProxyHops(undefined)).toBe(0);
+    expect(parseTrustedProxyHops('false')).toBe(0);
+    expect(parseTrustedProxyHops('true')).toBe(1);
+    expect(parseTrustedProxyHops('1')).toBe(1);
+    expect(parseTrustedProxyHops('2')).toBe(2);
+    expect(() => parseTrustedProxyHops('yes')).toThrow('TRUST_PROXY');
+  });
+});
+
+describe('Abuse limits', () => {
+  beforeEach(() => {
+    resetRuntimeState();
+  });
+
+  it('locks PIN entry for a room after repeated failures from many identities, but still allows share links', async () => {
+    const created = await createRoomForSocket('host-socket', {
+      roomId: 'LOCKROOM',
+      pin: '123456',
+      displayName: 'Host',
+    });
+    expect(created.success).toBe(true);
+    if (!created.success) return;
+
+    for (let attempt = 0; attempt < ROOM_PIN_FAILURE_LIMIT; attempt += 1) {
+      const denied = await joinRoomForSocket(`guess-${attempt}`, {
+        roomId: created.roomId,
+        pin: '000000',
+      }, `198.51.100.${attempt}`);
+      expect(denied.success).toBe(false);
+    }
+
+    const correctPin = await joinRoomForSocket('late-guest', {
+      roomId: created.roomId,
+      pin: created.pin,
+    }, '203.0.113.99');
+    expect(correctPin.success).toBe(false);
+    if (correctPin.success) return;
+    expect(correctPin.error).toContain('temporarily locked');
+
+    const viaLink = await joinRoomByLinkForSocket('link-guest', {
+      roomId: created.roomId,
+      shareToken: created.shareToken,
+    }, '203.0.113.100');
+    expect(viaLink.success).toBe(true);
+  });
+
+  it('does not carry a PIN lockout over to a new room that reuses the code', async () => {
+    const created = await createRoomForSocket('host-socket', { roomId: 'REUSE001', pin: '123456' });
+    expect(created.success).toBe(true);
+
+    for (let attempt = 0; attempt < ROOM_PIN_FAILURE_LIMIT; attempt += 1) {
+      await joinRoomForSocket(`guess-${attempt}`, { roomId: 'REUSE001', pin: '000000' }, `198.51.100.${attempt}`);
+    }
+
+    disconnectSocket('host-socket');
+    expect(rooms.has('REUSE001')).toBe(false);
+
+    const recreated = await createRoomForSocket('new-host', { roomId: 'REUSE001', pin: '654321' }, '203.0.113.1');
+    expect(recreated.success).toBe(true);
+    const joined = await joinRoomForSocket('new-guest', { roomId: 'REUSE001', pin: '654321' }, '203.0.113.2');
+    expect(joined.success).toBe(true);
+  });
+
+  it('limits join attempts per socket even when identities differ', async () => {
+    let lastAttempt: Awaited<ReturnType<typeof joinRoomForSocket>> | undefined;
+    for (let attempt = 0; attempt < 16; attempt += 1) {
+      lastAttempt = await joinRoomForSocket('noisy-socket', {
+        roomId: `NOPE${attempt}`,
+        pin: '123456',
+      }, `198.51.100.${attempt}`);
+    }
+
+    expect(lastAttempt?.success).toBe(false);
+    if (!lastAttempt || lastAttempt.success) return;
+    expect(lastAttempt.error).toBe('Rate limited');
+  });
+
+  it('caps image sharing per room across all senders', async () => {
+    const created = await createRoomForSocket('img-host', { roomId: 'IMGROOM1', pin: '123456' });
+    expect(created.success).toBe(true);
+    if (!created.success) return;
+
+    const senders = ['img-host', 'img-a', 'img-b', 'img-c'];
+    for (const sender of senders.slice(1)) {
+      const joined = await joinRoomByLinkForSocket(sender, {
+        roomId: created.roomId,
+        shareToken: created.shareToken,
+      }, sender);
+      expect(joined.success).toBe(true);
+    }
+
+    const results = senders.flatMap((sender) =>
+      [0, 1, 2].map(() => sendChatMessageForSocket(sender, created.roomId, {
+        type: 'image',
+        imageDataUrl: 'data:image/png;base64,QUJDRA==',
+      })),
+    );
+
+    expect(results.filter((result) => result.success)).toHaveLength(10);
+    const rejected = results.at(-1);
+    expect(rejected?.success).toBe(false);
+    if (!rejected || rejected.success) return;
+    expect(rejected.error).toContain('room is sharing images too quickly');
+  });
+});
+
+describe('HTTP endpoints', () => {
+  it('answers health checks without caching', async () => {
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    try {
+      const address = server.address();
+      if (!address || typeof address === 'string') throw new Error('Server did not bind to a port');
+
+      const response = await fetch(`http://127.0.0.1:${address.port}/healthz`);
+      expect(response.status).toBe(200);
+      expect(response.headers.get('cache-control')).toBe('no-store');
+      expect(await response.json()).toEqual({ status: 'ok' });
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
   });
 });

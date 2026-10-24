@@ -1,8 +1,8 @@
-import React, { useEffect, useRef, useState } from 'react';
-import twemoji from 'twemoji';
-import { Sparkles, Upload } from 'lucide-react';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import { Sparkles, Upload, WifiOff } from 'lucide-react';
 import { SyncController } from './SyncController';
 import { JoinScreen } from './components/JoinScreen';
+import { NoticeStack, type Notice } from './components/NoticeStack';
 import { WatchLayout } from './components/WatchLayout';
 import { useVideoMedia } from './hooks/useVideoMedia';
 import { useRoomSocket } from './hooks/useRoomSocket';
@@ -150,7 +150,10 @@ const getInitialSharedRoomToken = () => {
   if (!browserWindow) return '';
 
   const params = new URLSearchParams(browserWindow.location.search);
-  const tokenFromUrl = params.get('token')?.trim();
+  // Invite links carry the token in the fragment so it never reaches servers or
+  // proxy logs. The query parameter is still read for links copied before that.
+  const fragmentParams = new URLSearchParams(browserWindow.location.hash.slice(1));
+  const tokenFromUrl = fragmentParams.get('token')?.trim() || params.get('token')?.trim();
   if (tokenFromUrl) {
     return tokenFromUrl;
   }
@@ -230,21 +233,8 @@ const getTrustedSubtitleSrc = (value: string | null): string => {
   return sanitizeBlobUrl(value) ?? EMPTY_SUBTITLE_TRACK_SRC;
 };
 
-const EmojiText = ({ text }: { text: string }) => {
-  const textRef = useRef<HTMLSpanElement>(null);
-
-  useEffect(() => {
-    if (!textRef.current) return;
-    textRef.current.textContent = text;
-    twemoji.parse(textRef.current, {
-      folder: 'svg',
-      ext: '.svg',
-      className: 'emoji-inline',
-    });
-  }, [text]);
-
-  return <span ref={textRef} />;
-};
+const NOTICE_TIMEOUT_MS = 6000;
+const MAX_VISIBLE_NOTICES = 3;
 
 function App() {
   // ── UI-only state ─────────────────────────────────────────────────────────
@@ -257,19 +247,28 @@ function App() {
   const [sharedRoomId, setSharedRoomId] = useState(getInitialSharedRoomId);
   const [shareToken, setShareToken] = useState(getInitialSharedRoomToken);
   const [roomLinkCopied, setRoomLinkCopied] = useState(false);
-  const [viewportSize, setViewportSize] = useState(() => ({
-    width: globalThis.window?.innerWidth ?? 1440,
-    height: globalThis.window?.innerHeight ?? 900,
-  }));
+  const [notices, setNotices] = useState<Notice[]>([]);
 
   const videoRef = useRef<HTMLVideoElement>(null);
   const chatScrollRef = useRef<HTMLDivElement>(null);
   const copyResetTimeoutRef = useRef<number | null>(null);
   const joinScreenRef = useRef<HTMLDivElement>(null);
   const watchSectionRef = useRef<HTMLElement>(null);
-  // Shared ref: useVideoMedia needs to read the last known server state;
-  // we own it here and pass it to both hooks.
+  const noticeIdRef = useRef(0);
+  // Last known room playback state. The socket hook writes it and useVideoMedia
+  // reads it when a file finishes loading, so both share this one ref.
   const latestRoomStateRef = useRef<SyncState | null>(null);
+
+  const dismissNotice = useCallback((id: number) => {
+    setNotices((current) => current.filter((notice) => notice.id !== id));
+  }, []);
+
+  const notify = useCallback((message: string) => {
+    noticeIdRef.current += 1;
+    const id = noticeIdRef.current;
+    setNotices((current) => [...current.slice(-(MAX_VISIBLE_NOTICES - 1)), { id, message }]);
+    globalThis.setTimeout(() => dismissNotice(id), NOTICE_TIMEOUT_MS);
+  }, [dismissNotice]);
 
   // ── Persist theme / displayName ───────────────────────────────────────────
   useEffect(() => {
@@ -281,27 +280,12 @@ function App() {
     globalThis.window?.localStorage.setItem('letswatch-display-name', displayName);
   }, [displayName]);
 
-  // ── Viewport tracking ─────────────────────────────────────────────────────
-  useEffect(() => {
-    const browserWindow = globalThis.window;
-    if (!browserWindow) return;
-
-    const updateViewportSize = () => {
-      setViewportSize({ width: browserWindow.innerWidth, height: browserWindow.innerHeight });
-    };
-
-    updateViewportSize();
-    browserWindow.addEventListener('resize', updateViewportSize);
-    return () => browserWindow.removeEventListener('resize', updateViewportSize);
-  }, []);
-
   const {
     videoSrc,
     videoLabel,
     subtitleSrc,
     subtitleLabel,
     audioTracks,
-    drift,
     applyState,
     clearVideoFile,
     handleFileChange,
@@ -323,7 +307,8 @@ function App() {
     chatDraft,
     setChatDraft,
     isEmojiStripCollapsed,
-    latestRoomStateRef: socketLatestRoomStateRef,
+    drift,
+    setDrift,
     chatInputRef,
     chatImageInputRef,
     handleManualSync,
@@ -347,9 +332,11 @@ function App() {
     sharedRoomId, setSharedRoomId,
     shareToken, setShareToken,
     videoRef,
+    latestRoomStateRef,
     syncController,
     applyState,
     clientLog,
+    notify,
   });
 
   // ── Derived ───────────────────────────────────────────────────────────────
@@ -358,10 +345,22 @@ function App() {
   const trustedVideoSrc = getTrustedVideoSrc(videoSrc);
   const trustedSubtitleSrc = getTrustedSubtitleSrc(subtitleSrc);
 
-  // Keep our shared ref in sync with what the socket hook reports
+  const isWatching = isJoined && Boolean(videoSrc);
+
+  // Decorative blur and animated backgrounds compete with video decoding for the
+  // GPU, so the stylesheet switches them off while a video is loaded.
   useEffect(() => {
-    latestRoomStateRef.current = socketLatestRoomStateRef.current;
-  });
+    if (isWatching) {
+      document.documentElement.dataset.watching = 'true';
+    } else {
+      delete document.documentElement.dataset.watching;
+    }
+  }, [isWatching]);
+
+  const handleClearVideo = () => {
+    clearVideoFile();
+    setDrift(0);
+  };
 
   // ── Scroll chat to bottom on new messages ─────────────────────────────────
   useEffect(() => {
@@ -415,7 +414,8 @@ function App() {
 
     const shareUrl = new URL(browserWindow.location.href);
     shareUrl.searchParams.set('room', roomId);
-    shareUrl.searchParams.set('token', shareToken);
+    shareUrl.searchParams.delete('token');
+    shareUrl.hash = new URLSearchParams({ token: shareToken }).toString();
 
     try {
       await browserWindow.navigator.clipboard.writeText(shareUrl.toString());
@@ -427,7 +427,7 @@ function App() {
       clientLog('info', 'room.link_copied', { roomId });
     } catch (error) {
       clientLog('warn', 'room.link_copy_failed', { roomId, message: getErrorMessage(error) });
-      alert('Unable to copy the room link');
+      notify('Unable to copy the room link');
     }
   };
 
@@ -444,58 +444,64 @@ function App() {
 
   // ── Render ────────────────────────────────────────────────────────────────
   return (
-    <div
-      className={`app-shell ${isTheaterMode ? 'app-shell-theater' : ''}`}
-      style={
-        {
-          '--viewport-width': `${viewportSize.width}px`,
-          '--viewport-height': `${viewportSize.height}px`,
-        } as React.CSSProperties
-      }
-    >
+    <div className={`app-shell ${isTheaterMode ? 'app-shell-theater' : ''}`}>
       <div className="ambient-orb ambient-orb-one" aria-hidden="true" />
       <div className="ambient-orb ambient-orb-two" aria-hidden="true" />
       <div className="ambient-grid" aria-hidden="true" />
 
-      <header className={`page-chrome mx-auto mb-8 w-full max-w-[1600px] px-4 pt-5 sm:px-6 sm:pt-6 lg:px-10 lg:pt-8 ${isTheaterMode ? 'page-chrome-hidden' : ''}`}>
-        <div className="chrome-panel flex flex-col gap-6 rounded-[32px] px-6 py-6 sm:px-8 lg:flex-row lg:items-center lg:justify-between">
-          <div className="flex items-start gap-4">
+      <NoticeStack notices={notices} onDismiss={dismissNotice} />
+
+      {isJoined && !isConnected ? (
+        <div className="connection-banner status-card status-card-offline" role="status">
+          <WifiOff size={20} />
+          <div>
+            <p className="text-sm font-semibold">Disconnected</p>
+            <p className="text-sm text-current/80">Reconnecting to the room server…</p>
+          </div>
+        </div>
+      ) : null}
+
+      {/* While in a room the header shrinks to brand + themes so the player gets the space. */}
+      <header className={`page-chrome mx-auto w-full max-w-[1600px] px-4 pt-5 sm:px-6 sm:pt-6 lg:px-10 lg:pt-8 ${showJoinScreen ? 'mb-8' : 'mb-4'} ${isTheaterMode ? 'page-chrome-hidden' : ''}`}>
+        <div className={`chrome-panel flex flex-col rounded-[32px] lg:flex-row lg:items-center lg:justify-between ${showJoinScreen ? 'gap-6 px-6 py-6 sm:px-8' : 'gap-4 px-5 py-4 sm:px-6'}`}>
+          <div className="flex items-center gap-4">
             <div className="brand-mark">
-              <img src="/app-icon.svg" alt="Lets Watch Icon" className="h-12 w-12 object-contain" />
+              <img src="/app-icon.svg" alt="Lets Watch Icon" className={showJoinScreen ? 'h-12 w-12 object-contain' : 'h-9 w-9 object-contain'} />
             </div>
             <div className="space-y-2">
-              <div className="eyebrow">
-                <Sparkles size={14} />
-                <span>Local-first sync lounge</span>
-              </div>
+              {showJoinScreen ? (
+                <div className="eyebrow">
+                  <Sparkles size={14} />
+                  <span>Local-first sync lounge</span>
+                </div>
+              ) : null}
               <div>
                 <h1 className="hero-title">Lets Watch</h1>
-                <p className="hero-copy">
-                  Private watch parties with cinematic themes, low-friction room control, and playback that stays in step.
-                </p>
+                {showJoinScreen ? (
+                  <p className="hero-copy">
+                    Private watch parties with cinematic themes, low-friction room control, and playback that stays in step.
+                  </p>
+                ) : null}
               </div>
             </div>
           </div>
 
           <div className="theme-rail">
-            <p className="theme-rail-label">Choose the room mood</p>
-            <div className="hero-actions">
-              <button
-                type="button"
-                className="primary-button"
-                onClick={() => scrollToElement(showJoinScreen ? joinScreenRef.current : watchSectionRef.current)}
-              >
-                {showJoinScreen ? 'Start Your Room' : 'Jump to Player'}
-              </button>
-              <button
-                type="button"
-                className="secondary-button"
-                onClick={() => globalThis.window?.scrollTo({ top: 0, behavior: getScrollBehavior() })}
-              >
-                Browse Themes
-              </button>
-            </div>
-            <div className="flex flex-wrap gap-2">
+            {showJoinScreen ? (
+              <>
+                <p className="theme-rail-label">Choose the room mood</p>
+                <div className="hero-actions">
+                  <button
+                    type="button"
+                    className="primary-button"
+                    onClick={() => scrollToElement(joinScreenRef.current)}
+                  >
+                    Start Your Room
+                  </button>
+                </div>
+              </>
+            ) : null}
+            <div className="flex flex-wrap gap-2" role="group" aria-label="Theme">
               {THEME_OPTIONS.map((option) => (
                 <button
                   key={option.id}
@@ -576,7 +582,7 @@ function App() {
                 handleManualSync={handleManualSync}
                 handleTheaterToggle={handleTheaterToggle}
                 handleAudioTrackSwitch={handleAudioTrackSwitch}
-                clearVideoFile={clearVideoFile}
+                clearVideoFile={handleClearVideo}
                 handleSubtitleChange={handleSubtitleChange}
                 clearSubtitleTrack={clearSubtitleTrack}
                 drift={drift}
@@ -598,9 +604,7 @@ function App() {
                 handleEmojiSelect={handleEmojiSelect}
                 handleEmojiStripToggle={handleEmojiStripToggle}
                 handleChatImageChange={handleChatImageChange}
-                EmojiText={EmojiText}
                 topChatEmojis={TOP_CHAT_EMOJIS}
-                isConnected={isConnected}
                 roomId={roomId}
                 roomPin={roomPin}
                 roomLinkCopied={roomLinkCopied}

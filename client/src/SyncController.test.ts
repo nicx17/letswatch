@@ -58,6 +58,18 @@ describe('SyncController', () => {
     expect(syncController.getTargetTime(serverSnapshot)).toBe(32.5);
   });
 
+  it('treats local playback that agrees with the room as an echo', () => {
+    const roomSnapshot = { position: 10, updatedAt: Date.now() - 2000, playing: true };
+
+    expect(syncController.matchesRoomState({ position: 12.4, playing: true }, roomSnapshot)).toBe(true);
+    expect(syncController.matchesRoomState({ position: 12.4, playing: false }, roomSnapshot)).toBe(false);
+    expect(syncController.matchesRoomState({ position: 40, playing: true }, roomSnapshot)).toBe(false);
+  });
+
+  it('never treats an event as an echo before any room state is known', () => {
+    expect(syncController.matchesRoomState({ position: 0, playing: false }, null)).toBe(false);
+  });
+
   it('returns the snapshot position directly when paused', () => {
     const serverSnapshot = {
       position: 18.25,

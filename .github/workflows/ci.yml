@@ -50,3 +50,24 @@ jobs:
 
       - name: Run build checks
         run: npm run build
+
+      # The server runs TypeScript directly on Node, so prove the production entry
+      # point actually boots and serves requests, not just that it type-checks.
+      - name: Smoke-test production server
+        working-directory: server
+        env:
+          NODE_ENV: production
+          APP_URL: http://127.0.0.1:4000
+          HOST: 127.0.0.1
+          PORT: 4000
+        run: |
+          npm run start &
+          for attempt in $(seq 1 20); do
+            if curl -fsS http://127.0.0.1:4000/healthz; then
+              curl -fsS -o /dev/null http://127.0.0.1:4000/
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "Server did not become healthy" >&2
+          exit 1

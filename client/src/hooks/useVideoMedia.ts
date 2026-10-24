@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import type { AudioTrackInfo, SyncState } from '../types';
+import { DRIFT_TOLERANCE_SECONDS } from '../SyncController';
 
 type AudioTracksWithEvents = {
   addEventListener: (type: string, listener: () => void) => void;
@@ -17,7 +18,6 @@ export function useVideoMedia(
   const [subtitleSrc, setSubtitleSrc] = useState<string | null>(null);
   const [subtitleLabel, setSubtitleLabel] = useState<string | null>(null);
   const [audioTracks, setAudioTracks] = useState<AudioTrackInfo[]>([]);
-  const [drift, setDrift] = useState(0);
 
   const objectUrlRef = useRef<string | null>(null);
   const subtitleUrlRef = useRef<string | null>(null);
@@ -29,7 +29,7 @@ export function useVideoMedia(
     const diff = Math.abs(video.currentTime - state.position);
 
     if (state.playing) {
-      if (diff > 2) {
+      if (diff > DRIFT_TOLERANCE_SECONDS) {
         video.currentTime = state.position;
       }
       if (video.paused) {
@@ -129,7 +129,6 @@ export function useVideoMedia(
     clearSubtitleTrack();
     setVideoSrc(null);
     setVideoLabel(null);
-    setDrift(0);
   };
 
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -228,8 +227,6 @@ export function useVideoMedia(
     subtitleSrc,
     subtitleLabel,
     audioTracks,
-    drift,
-    setDrift,
     applyState,
     clearVideoFile,
     handleFileChange,

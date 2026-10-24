@@ -260,6 +260,13 @@ body::after {
     background: var(--orb-b);
 }
 
+/* Layout sizes the player from the viewport. CSS units track resizes and mobile
+   browser toolbars without re-rendering React on every resize event. */
+:root {
+    --viewport-width: 100vw;
+    --viewport-height: 100dvh;
+}
+
 .app-shell {
     position: relative;
     min-height: 100vh;
@@ -1194,12 +1201,10 @@ body::after {
     box-shadow: 0 20px 32px -26px var(--shadow-color);
 }
 
-.emoji-inline {
-    width: 1.2em;
-    height: 1.2em;
-    margin: 0 0.06em;
-    vertical-align: -0.18em;
-    display: inline-block;
+.chat-image-expired {
+    font-size: 0.85rem;
+    font-style: italic;
+    color: var(--text-muted);
 }
 
 .chat-message-own .chat-message-bubble {
@@ -1509,6 +1514,77 @@ body::after {
         left: auto;
         width: 4.5rem;
     }
+}
+
+/* Toasts replace blocking alert() dialogs. */
+.notice-stack {
+    position: fixed;
+    right: 1rem;
+    bottom: 1rem;
+    z-index: 60;
+    display: flex;
+    flex-direction: column;
+    gap: 0.6rem;
+    width: min(24rem, calc(100vw - 2rem));
+    pointer-events: none;
+}
+
+.notice-card {
+    display: flex;
+    align-items: flex-start;
+    gap: 0.75rem;
+    border-radius: 1.1rem;
+    padding: 0.85rem 0.9rem 0.85rem 1.1rem;
+    background: var(--offline-bg);
+    border: 1px solid var(--offline-border);
+    color: var(--offline-text);
+    box-shadow: 0 20px 40px -24px var(--shadow-color);
+    font-size: 0.9rem;
+    line-height: 1.4;
+    pointer-events: auto;
+    animation: message-in 180ms ease-out;
+}
+
+.notice-card p {
+    flex: 1;
+}
+
+.notice-dismiss {
+    flex-shrink: 0;
+    border-radius: 999px;
+    padding: 0.2rem;
+    opacity: 0.75;
+}
+
+.notice-dismiss:hover,
+.notice-dismiss:focus-visible {
+    opacity: 1;
+}
+
+/* The connection banner sits above every layout, including theater mode and mobile. */
+.connection-banner {
+    position: fixed;
+    top: 1rem;
+    left: 50%;
+    z-index: 60;
+    transform: translateX(-50%);
+    width: max-content;
+    max-width: calc(100vw - 2rem);
+}
+
+/* While a video plays, drop the GPU-heavy decoration: animated blurred orbs and
+   stacked backdrop blurs compete with video decoding on low-end devices. */
+:root[data-watching] body::before,
+:root[data-watching] body::after,
+:root[data-watching] .ambient-orb {
+    display: none;
+}
+
+:root[data-watching] *,
+:root[data-watching] *::before,
+:root[data-watching] *::after {
+    backdrop-filter: none !important;
+    -webkit-backdrop-filter: none !important;
 }
 
 @media (prefers-reduced-motion: reduce) {

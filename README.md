@@ -6,13 +6,13 @@ Lets Watch is a local-first watch-party app for self-hosted environments. Each v
 
 - Syncs play, pause, and seek events across a room with shared participant control.
 - Lets viewers create rooms with their own room code and 6-digit join PIN.
-- Offers room chat with viewer-selected names, quick emoji reactions, emoji-rendered text, and lightweight image sharing.
+- Offers room chat with viewer-selected names, quick emoji reactions, color emoji from the bundled Noto Color Emoji font, and lightweight image sharing.
 - Serves the React frontend and the Socket.IO backend from one Node process in production.
 - Keeps media local to each participant instead of uploading it to the server.
 - Broadcasts chat messages live without storing chat history on the server.
 - Includes basic hardening such as Helmet, payload validation with Zod, and lightweight rate limiting.
 - Obfuscates sensitive identifiers in backend logs so room and participant metadata are not written in plain text.
-- Applies dedicated authentication throttling to room create/join flows to reduce brute-force attempts, including reconnect-based retries from the same client identity.
+- Applies dedicated authentication throttling to room create/join flows to reduce brute-force attempts, including reconnect-based retries from the same client identity, and locks a room's PIN entry after repeated failures from any mix of clients.
 
 ## Repository Layout
 
@@ -24,7 +24,7 @@ Lets Watch is a local-first watch-party app for self-hosted environments. Each v
 
 ## Prerequisites
 
-- Node.js 20 or newer.
+- Node.js 22.18 or newer, which can run TypeScript natively. CI runs on Node 22 and 24, and `.nvmrc` pins Node 26 for local development.
 - npm 10 or newer.
 
 ## Local Development
@@ -66,6 +66,14 @@ NODE_ENV=production
 APP_URL=https://www.example.com
 ```
 
+| Variable | Required | Purpose |
+| --- | --- | --- |
+| `PORT` | No (default `4000`) | Port the HTTP and Socket.IO server listens on. |
+| `HOST` | No (default `0.0.0.0`) | Address to bind. Use `127.0.0.1` when a reverse proxy runs on the same machine. |
+| `NODE_ENV` | Yes in production | `production` enables static frontend serving, HSTS, and strict origin checks. |
+| `APP_URL` | Yes when `NODE_ENV=production` | Public origin. Used for CORS, Socket.IO admission, and CSP `connect-src`. The server refuses to start without it in production. |
+| `TRUST_PROXY` | No (default off) | Number of reverse proxies in front of the server (`true` means `1`). The client address used for rate limiting is read that many entries from the right of `X-Forwarded-For`. See [`DEPLOYMENT.md`](DEPLOYMENT.md#client-ip-and-trust_proxy). |
+
 ### Client
 
 Copy [`client/.env.example`](client/.env.example) to `client/.env` if the frontend needs to talk to a separately hosted backend:
@@ -103,9 +111,11 @@ What these commands do:
 - Chat images are resized in the browser before they are sent over Socket.IO.
 - Joining an existing room requires both the chosen room code and its 6-digit PIN.
 - Room codes are normalized to uppercase and PIN inputs are reduced to six digits during create and join.
-- Rooms also expose a copyable share link with a room-specific token so invite links can join directly without re-entering the PIN.
+- Rooms also expose a copyable share link with a room-specific token so invite links can join directly without re-entering the PIN. The token is in the URL fragment (`#token=...`), so it is never sent to the server or written to proxy logs.
 - PIN-based joins rotate the current share token, so older copied links stop working after a fresh PIN join.
-- Room state is in-memory only. When the last participant disconnects, room membership and playback state are dropped.
+- Room state is in-memory only. When the last participant disconnects, room membership and playback state are dropped. Run exactly one server process.
+- `GET /healthz` returns `{"status":"ok"}` for load balancers and uptime checks.
+- The server runs TypeScript directly on Node (type stripping), so there is no server build step or runtime transpiler.
 - Production Socket.IO admission checks `Origin` first and only falls back to the effective `Host` header when `Origin` is absent. It does not trust `X-Forwarded-Host` as an auth signal.
 
 ## Security Headers
